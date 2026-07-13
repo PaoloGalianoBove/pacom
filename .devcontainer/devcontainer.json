@@ -1,0 +1,27 @@
+{
+  "name": "pacom Devcontainer",
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}/pacom",
+  "containerEnv": {
+    "GENERIC_CPP_STDLIB_PATH": "/usr/include/c++/13",
+    "ARCH_SPECIFIC_CPP_STDLIB_PATH": "/usr/include/x86_64-linux-gnu/c++/13",
+    "Boost_INCLUDE_DIR": "/usr/include"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash"
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools",
+        "llvm-vs-code-extensions.vscode-clangd"
+      ]
+    }
+  },
+  "remoteUser": "ubuntu"
+}

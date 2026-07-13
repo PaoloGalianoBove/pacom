@@ -1,0 +1,6 @@
+light-switch/
+up-transport-vsomeip-rust/
+pacom/target
+.git
+.gitignore
+*.swp
