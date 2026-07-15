@@ -1,0 +1,8 @@
+{
+  "rpc": {
+    "provide": ["/rpc/rtt/echo"]
+  },
+  "topics": {
+    "publish": ["/events/rtt/latency"]
+  }
+}

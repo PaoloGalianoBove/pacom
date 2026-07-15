@@ -1,5 +1,13 @@
-pub mod l1;
-pub mod l2;
+//! pacom exposes a high-level runtime API over uProtocol transports.
 
-// Re-export Layer 2 high-level entities directly at the crate root
-pub use l2::{PlatformClient, SdkConfig, MqttConfig};
+#![warn(missing_docs)]
+/// Error definitions for the PACOM runtime.
+pub mod error;
+mod public_api;
+mod runtime;
+mod transport;
+
+// Re-export the public API and core runtime types at the crate root.
+pub use error::PacomError;
+pub use public_api::PacomRuntime;
+pub use runtime::{RuntimeConfig, MqttConfig, ManifestConfig};

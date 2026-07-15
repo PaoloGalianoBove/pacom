@@ -1,0 +1,6 @@
+{
+  "topics": {
+    "publish": ["/bridge/down", "/cloud/upstream"],
+    "subscribe": ["/bridge/up", "/cloud/command"]
+  }
+}

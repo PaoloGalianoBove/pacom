@@ -1,0 +1,8 @@
+{
+  "rpc": {
+    "consume": ["/rpc/rtt/echo"]
+  },
+  "topics": {
+    "subscribe": ["/events/rtt/latency"]
+  }
+}
