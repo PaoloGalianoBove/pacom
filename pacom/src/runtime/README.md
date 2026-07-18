@@ -1,45 +1,62 @@
-# Modulo `runtime`
+# Modulo runtime
 
-Il modulo `runtime` è la sala macchine di PACOM. È la colla che unisce le stringhe dell'API pubblica con le strutture dati rigide di uProtocol. Chiunque voglia fare debug su "perché un messaggio non parte" o "perché la discovery non va" dovrà guardare qui.
+Il modulo runtime contiene il comportamento operativo di PACOM: validazione manifest, discovery, publish/subscribe e RPC su trasporti multipli.
 
-## `engine.rs`
+## engine.rs in breve
 
-Questo file contiene l'`Engine`, ovvero lo stato principale dell'applicazione.
-L'engine detiene:
-- Il `ManifestConfig` dell'applicazione.
-- L'istanza del `router` uStreamer (per smistare verso vsomeip o mqtt).
-- Le istanze di `InMemoryRpcClient` e `InMemoryRpcServer` (forniti dalla libreria ufficiale `up-rust`), necessari per gestire l'asincronia delle chiamate RPC.
-- Una tabella di cache concorrente (es. `DashMap` o un `RwLock<HashMap>`) per il **Service Discovery**.
+RuntimeEngine mantiene:
+- router trasporti (vSomeIP + MQTT)
+- client/server RPC di up-rust
+- cache discovery concorrente
+- capability locali pubblicate (RPC provide + topic publish)
+- pending subscriptions per topic non ancora scoperti
 
-### Il ciclo di Discovery (Come le app si trovano tra loro)
+## Discovery attuale
 
-Il discovery di PACOM è proprietario e basato su UDP/vSomeIP PubSub (non usa lo standard `uDiscovery` per semplicità). Funziona tramite due task in background (tokio spawned tasks) inizializzati dentro `PacomRuntime::new`:
+PACOM usa un canale discovery interno su URI fissa `0x0F00/0x8F01` (16 canali, selezione per `UP_UE_ID % 16`).
 
-1. **Il Broadcaster (Annuncio)**:
-   In un ciclo infinito (ogni `PACOM_DISCOVERY_REANNOUNCE_SECS` secondi), l'engine prende tutti gli RPC `provide` e i topic `publish` dal `ManifestConfig` e costruisce dei messaggi JSON (es. `{ "kind": "rpc_provide", "name": "/rpc/echo", "provider_ue_id": 4660 }`). Invia questi JSON su un topic hardcoded noto a tutti (URI `0x0F00.8F01`).
+Flusso:
+1. ogni provider annuncia `rpc_provide` e `topic_publish` con payload JSON
+2. i consumer aggiornano una cache locale provider per nome logico
+3. se una subscribe topic era in pending, viene attivata al primo announce
+4. un task periodico (`PACOM_DISCOVERY_REANNOUNCE_SECS`) riannuncia le capability
 
-2. **L'Ascoltatore (Cache)**:
-   Al boot, l'engine si iscrive al topic `0x0F00.8F01`. Ogni volta che riceve un JSON da un'altra applicazione sulla rete, fa il parsing e aggiorna la sua cache interna: *"Ah, il metodo `/rpc/echo` si trova sull'app con UE_ID `0x1234`!"*.
+Nota importante: per i topic publish, il provider UE-ID annunciato deve coincidere con l'UE-ID realmente usato nel publish.
 
-Quando chiami `invoke_method("/rpc/echo")`, la funzione va a leggere in questa cache. Se il provider per `/rpc/echo` non è ancora arrivato, la funzione fa un loop di `sleep` (polling) fino a quando non appare o scade il timeout (180 secondi di default).
+## Split UE-ID tra RPC e topic publish
 
-## `logical_registry.rs`
+Per evitare collisioni SOME/IP tra offer RPC e publish topic, il runtime usa:
+- UE-ID applicativo base per RPC
+- UE-ID derivato per topic publish (`derive_topic_publish_ue_id`)
 
-L'obiettivo di uProtocol è indirizzare i messaggi usando interi (URI numerici) per risparmiare byte sul bus. L'utente PACOM usa invece nomi stringa. Come li mappiamo?
+La stessa identità UE topic viene usata sia nel messaggio publish sia negli annunci discovery (iniziali e periodici).
 
-1. **Il `ManifestConfig`**:
-   Legge il file `manifest.json`. È lo schema che certifica cosa l'applicazione ha il permesso di fare. Le liste `rpc.provide`, `rpc.consume`, `topics.publish`, `topics.subscribe` vengono popolate qui.
+## Startup order e semantica eventi
 
-2. **L'Algoritmo di Hashing FNV-1a**:
-   Invece di avere un registro centrale che assegna ID arbitrari (come `echo = 1`, `telemetry = 2`), PACOM calcola dinamicamente l'ID usando l'algoritmo di hash FNV-1a sulla stringa logica.
-   - Per un topic (es. `/sensors/speed`), fa l'hash e forza l'ID nel range `0x8000 - 0xFFFF` (range previsto per le risorse/eventi).
-   - Per un metodo RPC (es. `/rpc/echo`), fa l'hash e forza l'ID nel range `0x0001 - 0x7FFF` (range previsto per i metodi).
+La discovery rende robusta la registrazione listener anche se il subscriber parte dopo.
+Gli eventi publish restano fire-and-forget: se un subscriber non era attivo nel momento di un evento, quell'evento non viene replayato automaticamente.
 
-3. **Collision Detection (Sicurezza)**:
-   L'hash FNV-1a a 16 bit può avere collisioni (due stringhe diverse che generano lo stesso numero).
-   All'avvio, `logical_registry` scansiona tutte le stringhe nel manifest, ne calcola gli ID, e verifica che non ci siano due stringhe che producano lo stesso ID. Se succede, restituisce un `PacomError::IdCollision` impedendo il boot dell'applicazione ed evitando bug di indirizzamento critici a runtime.
+## logical_registry.rs
 
-## Come contribuire a `runtime`
+Mappa nomi logici stringa in ID uProtocol numerici con FNV-1a 16 bit e controlla collisioni a startup:
+- range metodi RPC: `0x0001..=0x7FFF`
+- range topic/eventi: `0x8000..=0xFFFF`
 
-- **Performance**: Il discovery polling loop in `invoke_method` potrebbe essere ottimizzato passando da uno `sleep` in polling a un meccanismo di `Notify` o `watch` asincrono fornito da tokio.
-- **Conformità uProtocol**: Se vuoi implementare la specifica ufficiale `uDiscovery` protobuf-based, questo è il posto giusto. Dovrai rimpiazzare il builder JSON con messaggi protobuf e cambiare i ruoli di `register`/`resolve`.
+In caso di collisione il boot viene bloccato con errore esplicito.
+
+## Variabili utili
+
+- `UP_AUTHORITY`
+- `UP_UE_ID`
+- `PACOM_DISCOVERY_MAX_WAIT_MS`
+- `PACOM_DISCOVERY_POLL_MS`
+- `PACOM_DISCOVERY_REANNOUNCE_SECS`
+- `PACOM_DEBUG_VERBOSE`
+- `PACOM_ENABLE_LOCAL_WILDCARD_SUBSCRIBE`
+
+## Linee guida contributo
+
+- evitare panic/unwrap nel path runtime
+- mantenere coerenza tra identita discovery e identita traffico reale
+- usare log verbose solo sotto `PACOM_DEBUG_VERBOSE`
+- preferire modifiche generali (non case-specific)

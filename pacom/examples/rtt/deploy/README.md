@@ -138,3 +138,23 @@ Stop server:
 ```bash
 docker stop ecu-a-server
 ```
+
+## Quick RTT regression checklist
+
+1. Start server container first, then client.
+2. Trigger at least one RPC round-trip from client.
+3. Confirm no vSomeIP registration conflicts and no timeout.
+
+Useful checks:
+
+```bash
+docker logs ecu-a-server | grep -E "register|offer|error|timeout|fail" -i
+docker logs ecu-a-client | grep -E "invoke|response|latency|error|timeout|fail" -i
+```
+
+If running detached with log files:
+
+```bash
+grep -E "register|offer|error|timeout|fail" /tmp/pacom-rtt-server.log
+grep -E "invoke|response|latency|error|timeout|fail" /tmp/pacom-rtt-client.log
+```

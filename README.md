@@ -18,40 +18,46 @@ An application developer using `pacom`:
 
 The library resolves all of this transparently at runtime.
 
----
-
-## Architecture
+--## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Application Code                           │
-│   call_rpc("light-switch", payload)                             │
-│   register_rpc_method("light-switch", |bytes| async { ... })    │
-│   publish("light-status", payload)                              │
-│   subscribe("light-switch/light-status", |bytes| { ... })       │
+│   invoke_method("/rpc/echo", payload)                           │
+│   register_rpc_method("/rpc/echo", |bytes| async { ... })      │
+│   publish_event("/sensors/speed", payload)                      │
+│   subscribe_event("/sensors/speed", |bytes| { ... })            │
 └───────────────────────┬─────────────────────────────────────────┘
-                        │ Vec<u8> + logical service names
+                        │ Vec<u8> + logical service/topic names
                         ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Layer 2 — src/l2/                             │
+│              Public API Layer — src/public_api/                 │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │   PacomRuntime (facade)                                 │   │
+│   └───────────────────────────┬─────────────────────────────┘   │
+└───────────────────────────────┼─────────────────────────────────┘
+                                │ Delegations
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│               Runtime Layer — src/runtime/                      │
 │                                                                 │
 │  ┌─────────────────────┐    ┌──────────────────────────────┐   │
-│  │   PlatformClient    │    │   Service Catalog            │   │
-│  │   (client.rs)       │◄───│   (catalog.rs)               │   │
-│  │                     │    │   "light-switch" →           │   │
-│  │  InMemoryRpcClient  │    │   (ue_id=0x1234, method=1)  │   │
-│  │  InMemoryRpcServer  │    │   Loaded from built-ins +   │   │
-│  └────────┬────────────┘    │   /etc/pacom/services.json  │   │
-│           │                 └──────────────────────────────┘   │
+│  │   RuntimeEngine     │    │   Logical Registry           │   │
+│  │   (engine.rs)       │◄───│   (logical_registry.rs)      │   │
+│  │                     │    │   FNV-1a Dynamic Hashing     │   │
+│  │  InMemoryRpcClient  │    │   Manifest validation        │   │
+│  │  InMemoryRpcServer  │    │   Collision detection        │   │
+│  └────────┬────────────┘    └──────────────────────────────┘   │
 └───────────┼─────────────────────────────────────────────────────┘
             │ UUri, UMessage (uProtocol native)
             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Layer 1 — src/l1/                             │
+│              Transport Layer — src/transport/                   │
 │                                                                 │
 │  ┌──────────────────┐    ┌────────────────────────────────┐    │
-│  │  UStreamerRouter │    │  vsomeip.rs                    │    │
-│  │  (router.rs)     │───►│  - Leader election             │    │
+│  │  PacomRouter      │    │  vsomeip.rs                    │    │
+│  │  (router.rs)     │───►│  - Threaded execution          │    │
 │  │                  │    │  - Auto IP detection           │    │
 │  │  local → SOME/IP │    │  - JSON config generation      │    │
 │  │  cloud → MQTT 5  │    │  - UPTransportVsomeip          │    │
@@ -72,9 +78,9 @@ The library resolves all of this transparently at runtime.
 
 | Layer | Package | Responsibility |
 |-------|---------|----------------|
-| **L1** | `src/l1/` | Raw uProtocol transports: `UPTransportVsomeip`, `Mqtt5Transport`, `UStreamerRouter` |
-| **L2** | `src/l2/` | Developer-facing API: `PlatformClient`, `catalog`, closure wrappers for RPC and pub/sub |
-| **App** | `examples/` | Only imports `pacom::{PlatformClient, SdkConfig}` — zero uProtocol knowledge required |
+| **Public API** | `src/public_api/` | Facade: `PacomRuntime` providing clean, logical methods for application developers. |
+| **Runtime** | `src/runtime/` | Engine orchestrating RPC and pub/sub flows, and the service catalog/logical mapping. |
+| **Transport** | `src/transport/` | Raw uProtocol transports: `vsomeip.rs`, `mqtt.rs`, and the `PacomRouter` proxy. |
 
 ---
 
@@ -83,19 +89,22 @@ The library resolves all of this transparently at runtime.
 ### Server (RPC endpoint)
 
 ```rust
-use pacom::{PlatformClient, SdkConfig};
+use pacom::{PacomRuntime, RuntimeConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = PlatformClient::new(SdkConfig { mqtt_config: None }).await?;
+    let client = PacomRuntime::new(RuntimeConfig { 
+        mqtt_config: None,
+        manifest_path: None,
+    }).await?;
 
-    client.register_rpc_method("light-switch", |request_bytes| async move {
+    client.register_rpc_method("/rpc/echo", |request_bytes| async move {
         let command = String::from_utf8_lossy(&request_bytes).into_owned();
         println!("Received command: {}", command);
         format!("Ack: {}", command).into_bytes()
     }).await?;
 
-    println!("Service 'light-switch' is listening...");
+    println!("Service '/rpc/echo' is listening...");
     std::thread::park();
     Ok(())
 }
@@ -104,13 +113,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Client (RPC caller)
 
 ```rust
-use pacom::{PlatformClient, SdkConfig};
+use pacom::{PacomRuntime, RuntimeConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = PlatformClient::new(SdkConfig { mqtt_config: None }).await?;
+    let client = PacomRuntime::new(RuntimeConfig { 
+        mqtt_config: None,
+        manifest_path: None,
+    }).await?;
 
-    let response = client.call_rpc("light-switch", b"turn-on".to_vec()).await?;
+    let response = client.invoke_method("/rpc/echo", b"turn-on".to_vec()).await?;
     println!("Response: {}", String::from_utf8_lossy(&response));
 
     Ok(())
@@ -121,64 +133,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 // Publisher
-client.publish("light-status", b"ON".to_vec()).await?;
+client.publish_event("/sensors/speed", b"100".to_vec()).await?;
 
 // Subscriber
-client.subscribe("light-switch/light-status", |bytes| {
-    println!("Status update: {}", String::from_utf8_lossy(&bytes));
+client.subscribe_event("/sensors/speed", |bytes| {
+    println!("Speed update: {}", String::from_utf8_lossy(&bytes));
 }).await?;
 ```
-
-### Cloud connectivity (MQTT 5)
-
-```rust
-use pacom::{PlatformClient, SdkConfig, MqttConfig};
-
-let client = PlatformClient::new(SdkConfig {
-    mqtt_config: Some(MqttConfig {
-        broker_uri: "mqtt://broker.example.com:1883".to_string(),
-        client_id: "gw-zonale-1".to_string(),
-    }),
-}).await?;
-```
-
----
-
-## Configuration
-
-### Runtime Identity (environment variables)
-
-`pacom` resolves the ECU identity and application ID at startup from the container environment — **never** hardcoded in application code.
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `UP_AUTHORITY` | Logical name of the ECU / zone (e.g. `gw-zonale-1`) | `local_ecu` |
-| `UP_UE_ID` | Application UE ID in hex or decimal (e.g. `0x1234`) | Auto-generated (FNV-1a hash of executable name, range `≥ 0x1000`) |
-
-> In an SDV deployment, these variables are injected by the container orchestrator (e.g. Kubernetes, AUTOSAR Adaptive, or a custom operator). The application source code never changes between deployments.
-
-### Service Catalog
-
-Service names are resolved to their numerical uProtocol identifiers via a **two-layer catalog**:
-
-1. **Built-in defaults** (compiled into the binary):
-   - `"light-switch"` → `(ue_id=0x1234, method_id=1)`
-   - `"light-status"` → `(resource_id=0x8001)`
-
-2. **Runtime overrides** (loaded at startup, optional):
-   - `/etc/pacom/services.json` — maps service names to `(ue_id, method_id)` tuples
-   - `/etc/pacom/topics.json` — maps topic names to `resource_id` values
-
-**Example `/etc/pacom/services.json`:**
-```json
-{
-  "climate-control": [7890, 2],
-  "door-lock":       [5678, 1]
-}
-```
-
----
-
 ## Transport Behavior
 
 ### vSomeIP (intra-vehicle)
@@ -189,129 +150,93 @@ Service names are resolved to their numerical uProtocol identifiers via a **two-
 
 ### MQTT 5 (off-vehicle / cloud)
 
-- Instantiated **only** if `SdkConfig.mqtt_config` is `Some(...)`.
+- Instantiated **only** if `RuntimeConfig.mqtt_config` is `Some(...)`.
 - Used automatically for messages addressed to authorities outside the local ECU.
-- The `UStreamerRouter` routes traffic to MQTT when the destination authority differs from the local one.
+- The `PacomRouter` routes traffic to MQTT when the destination authority differs from the local one.
 
 ---
 
 ## Running locally (from this devcontainer)
 
-I binari sono già compilati. Dopo una prima `cargo build --examples`, registra la libreria nel sistema (operazione **una tantum** per sessione):
+The binaries are already compiled (or can be compiled with cargo). First, register the library in the dynamic loader system (one-time operation per session):
 
 ```bash
-LIB=$(find /workspaces/docker-uprotocol/pacom/target -name libvsomeip3.so.3 2>/dev/null | head -1 | xargs dirname)
+LIB=$(find /workspaces/pacom-develop/pacom/target -name libvsomeip3.so.3 2>/dev/null | head -1 | xargs dirname)
 echo "$LIB" | sudo tee /etc/ld.so.conf.d/vsomeip3.conf && sudo ldconfig
 ```
 
-Da quel momento in poi, server e client si avviano senza nessuna variabile aggiuntiva:
+From that point, server and client can be started using `cargo run`:
 
 ```bash
-# Terminale 1 — Server
-UP_AUTHORITY=linux UP_UE_ID=0x1234 ./target/debug/examples/server
+# Terminal 1 — Server
+UP_AUTHORITY=linux UP_UE_ID=0x1234 cargo run --example rtt_server
 
-# Terminale 2 — Client (benchmark 10K richieste)
-UP_AUTHORITY=linux UP_UE_ID=0x5678 ./target/debug/examples/client
+# Terminal 2 — Client (benchmark 10K requests)
+UP_AUTHORITY=linux UP_UE_ID=0x5678 cargo run --example rtt_client
 ```
 
-> Il `postCreateCommand` nel `devcontainer.json` esegue il `ldconfig` automaticamente
-> alla riapertura del devcontainer (se i binari sono già presenti).
+> The `postCreateCommand` in the `devcontainer.json` runs `ldconfig` automatically upon reopening the devcontainer (if the binaries are already present).
 
 ---
 
 ## Docker
 
-### Il Dockerfile
+### The Dockerfile
 
-Il [`Dockerfile`](../Dockerfile) ora espone due target distinti:
+The [`Dockerfile`](file:///workspaces/pacom-develop/pacom/Dockerfile) inside `pacom/` exposes a clean multi-stage build:
+- It compiles all example binaries: `rtt_server`, `rtt_client`, `mqtt_bridge_edge`, `mqtt_bridge_hub`, `mqtt_bridge_probe`, `mqtt_bridge_sender`.
+- It installs the native `vsomeip` libraries to `/usr/local/lib`.
 
-- `dev`: immagine per devcontainer e sviluppo interattivo, con toolchain Rust e sorgenti.
-- `runtime`: immagine pulita di esecuzione, con solo binari e librerie native installate in `/usr/local/lib`.
+### Building the Image
 
-`up-transport-vsomeip-rust` **non** viene copiato nel repository dell'applicazione finale:
-la dipendenza viene scaricata e compilata durante la `cargo build` come specificato in `Cargo.toml`,
-ma il suo `build.rs` resta confinato nel grafo delle dipendenze.
-
-```
-Context di build = solo pacom/     ← nessun light-switch, nessun up-transport-vsomeip-rust locale
-Dipendenze Rust   = da crates.io + GitHub (automatico durante cargo build)
-```
-
-### Build dell'immagine
-
-Per il devcontainer o per lavorare dentro `pacom`:
+To build the demo image:
 
 ```bash
-# Dalla root del workspace (dove si trova il Dockerfile)
-cd /workspaces/docker-uprotocol
-docker build --target dev -t pacom-dev:latest .
+# From the pacom subdirectory (where the Dockerfile is located)
+cd /workspaces/pacom-develop/pacom
+docker build -t pacom-demo:latest .
 ```
 
-Per un'immagine di sola esecuzione, senza `LD_LIBRARY_PATH` e senza sorgenti:
+### Running the RTT Containers locally
+
+To run the RTT client and server in separate containers sharing a SOME/IP IPC connection (using a shared volume for the Unix socket to bypass network configuration):
 
 ```bash
-cd /workspaces/docker-uprotocol
-docker build --target runtime -t pacom-runtime:latest .
-```
+# Create a shared volume for vSomeIP IPC sockets
+docker volume create pacom-ipc
 
-> La prima build scarica e compila `vsomeip-sys` (~5 min). Le build successive usano
-> la cache Docker e sono veloci.
-
-### Avviare i due container (intra-host)
-
-I container sulla stessa bridge `docker0` si vedono già via IP.  
-Il SOME/IP Service Discovery usa multicast `224.224.224.224:30490/udp`.
-
-```bash
-# Terminale 1 — Server
+# Run the Server (routing manager role)
 docker run --rm -it \
   --name pacom-server \
-  -e UP_AUTHORITY=gw-zonale-1 \
+  -v pacom-ipc:/tmp \
+  -e APP_BIN=rtt_server \
+  -e UP_AUTHORITY=ecu-a \
   -e UP_UE_ID=0x1234 \
-    pacom-runtime:latest \
-    server
+  -e PACOM_MANIFEST_PATH=/opt/pacom/examples/rtt/deploy/manifest-server.json \
+  -e PACOM_VSOMEIP_CONFIG_PATH=/opt/pacom/examples/rtt/deploy/vsomeip-router.json \
+  pacom-demo:latest
 
-# Terminale 2 — Client (benchmark 10K richieste)
+# Run the Client
 docker run --rm -it \
   --name pacom-client \
-  -e UP_AUTHORITY=gw-zonale-1 \
-  -e UP_UE_ID=0x5678 \
-    pacom-runtime:latest \
-    client
+  -v pacom-ipc:/tmp \
+  -e APP_BIN=rtt_client \
+  -e UP_AUTHORITY=ecu-a \
+  -e UP_UE_ID=0x2234 \
+  -e PACOM_MANIFEST_PATH=/opt/pacom/examples/rtt/deploy/manifest-client.json \
+  -e PACOM_VSOMEIP_CONFIG_PATH=/opt/pacom/examples/rtt/deploy/vsomeip-client.json \
+  pacom-demo:latest
 ```
 
-### Avviare i due container (inter-host — due macchine fisiche)
-
-Con `--network host` il container usa direttamente la NIC della macchina host;
-il multicast SOME/IP SD funziona sulla LAN fisica senza configurazione aggiuntiva.
+### Retrieving the Benchmark CSV
 
 ```bash
-# Macchina 1 — Server
-docker run --rm -it --network host \
-  -e UP_AUTHORITY=gw-zonale-1 \
-  -e UP_UE_ID=0x1234 \
-    pacom-runtime:latest \
-    server
-
-# Macchina 2 — Client
-docker run --rm -it --network host \
-  -e UP_AUTHORITY=gw-zonale-2 \
-  -e UP_UE_ID=0x5678 \
-    pacom-runtime:latest \
-    client
+docker cp pacom-client:/opt/pacom/rtt_measurements.csv ./rtt_results.csv
 ```
 
-### Recuperare il CSV di benchmark
+### Applications depending on `pacom`
 
-```bash
-docker cp pacom-client:/usr/local/bin/rtt_measurements.csv ./rtt_results.csv
-```
-
-### Applicazioni che dipendono da `pacom`
-
-Se sviluppi una tua app Rust sopra `pacom`, **non** devi aggiungere un `build.rs` al progetto applicativo.
-
-La tua crate resta normale:
+When developing a Rust application using `pacom`, you do **not** need a custom `build.rs`. Simply add it to your dependencies:
 
 ```toml
 [dependencies]
@@ -319,20 +244,13 @@ pacom = { path = "../pacom" }
 tokio = { version = "1", features = ["full"] }
 ```
 
-La compilazione nativa di vSomeIP avviene dentro la dipendenza transitiva `vsomeip-sys`.
-Quello che conta per il rilascio non e' il `build.rs`, ma avere un'immagine runtime che:
-
-- contenga i `.so` di vSomeIP in un path standard come `/usr/local/lib`
-- esegua `ldconfig` in fase di build
-- copi solo il binario finale dell'app e le librerie native necessarie
-
-In altre parole: `build.rs` resta nel layer di build, non entra nel contratto della tua app.
+The native compilation of `vSomeIP` is handled transitively by the dependency.
 
 ---
 
 ## Benchmark Output
 
-The client example produces a `rtt_measurements.csv` file with the same schema as the `light-switch` reference benchmark, enabling direct performance comparison:
+The `rtt_client` example produces a `rtt_measurements.csv` file with the following columns:
 
 ```
 iteration,rtt_ms,status,proc_ram_mb,proc_vsz_mb,proc_cpu_pct,sys_ram_pct,sys_cpu_pct
@@ -350,7 +268,7 @@ iteration,rtt_ms,status,proc_ram_mb,proc_vsz_mb,proc_cpu_pct,sys_ram_pct,sys_cpu
 | `proc_vsz_mb` | Process virtual memory in MB |
 | `proc_cpu_pct` | Process CPU usage % (sampled every 200ms) |
 | `sys_ram_pct` | System RAM usage % at startup |
-| `sys_cpu_pct` | System CPU % (reserved, currently `0.0`) |
+| `sys_cpu_pct` | System CPU % (currently reserved/unused) |
 
 ---
 
@@ -359,20 +277,16 @@ iteration,rtt_ms,status,proc_ram_mb,proc_vsz_mb,proc_cpu_pct,sys_ram_pct,sys_cpu
 ```
 pacom/
 ├── Cargo.toml              # Dependencies (tokio, up-rust, up-transport-vsomeip, sysinfo…)
+├── Dockerfile              # Containerization definition
 ├── examples/
-│   ├── server.rs           # Minimal RPC server example (~20 lines)
-│   └── client.rs           # 10K-iteration RTT benchmark
+│   ├── mqtt_bridge/        # Example showing SOME/IP to MQTT bridging
+│   └── rtt/                # Example showing RTT measurements
 └── src/
-    ├── lib.rs              # Crate root: re-exports PlatformClient, SdkConfig, MqttConfig
-    ├── l1/                 # Layer 1 — uProtocol transport primitives
-    │   ├── mod.rs
-    │   ├── vsomeip.rs      # vSomeIP: leader election, IP detection, config generation
-    │   ├── mqtt.rs         # MQTT 5: optional cloud transport
-    │   └── router.rs       # UStreamerRouter: local/cloud traffic steering
-    └── l2/                 # Layer 2 — developer-facing SDK
-        ├── mod.rs
-        ├── catalog.rs      # Service name → (ue_id, method_id) resolution
-        └── client.rs       # PlatformClient + closure wrappers for RPC and pub/sub
+    ├── lib.rs              # Crate root: re-exports PacomRuntime, RuntimeConfig, MqttConfig, etc.
+    ├── error.rs            # Custom PacomError type
+    ├── public_api/         # Public API: PacomRuntime facade
+    ├── runtime/            # Runtime: Engine orchestrating discovery, mapping and routing
+    └── transport/          # Transport: vsomeip, mqtt, and dynamic router (uStreamer)
 ```
 
 ---
@@ -385,8 +299,8 @@ pacom/
 | `up-transport-vsomeip` | GitHub | SOME/IP transport for in-vehicle communication |
 | `up-transport-mqtt5` | `0.4.0` | MQTT 5 transport for cloud/off-vehicle communication |
 | `tokio` | `1` | Async runtime |
-| `sysinfo` | `0.39.6` | Process and system resource monitoring for benchmarks |
-| `serde_json` | `1.0` | Typesafe vSomeIP JSON configuration generation |
+| `sysinfo` | `0.37.2` | Process and system resource monitoring for benchmarks |
+| `serde_json` | `1.0` | Typesafe JSON parsing and config generation |
 | `async-trait` | `0.1` | Async trait support |
 
 ---
@@ -394,21 +308,14 @@ pacom/
 ## Design Principles
 
 ### 1. SDV-first identity model
-Applications are **location-agnostic**. The same binary can run on *Gateway Zonale 1* today and *Gateway Zonale 2* tomorrow with no code changes — only the injected environment variables change.
+Applications are location-agnostic. The same binary runs anywhere with no code changes — identity is resolved dynamically from environment variables injected by the environment.
 
 ### 2. Strict layer separation
-The three-layer model (L1 transport → L2 SDK → application) enforces a clean boundary:
-- **L1** is the only layer that knows about uProtocol wire formats.
-- **L2** is the only layer that maps human-readable service names to wire addresses.
-- **Applications** never touch either layer directly.
+Enforces a clean boundary between the clean logical facade (`public_api`), the middleware logic and registry (`runtime`), and the low-level transport mechanisms (`transport`).
 
 ### 3. Zero-copy hot loop
-The benchmark follows the same discipline as the `light-switch` reference implementation:
-- Resource metrics are sampled in a **background thread** using lock-free atomics.
-- All measurements are accumulated in-memory.
-- The CSV is flushed **once** at the end — no I/O overhead in the measurement loop.
+To ensure accurate performance benchmarks, resource metrics are collected asynchronously in a background thread and written to CSV once after the loop finishes to prevent disk I/O interference.
 
 ### 4. Graceful degradation
-- No MQTT configuration? The cloud transport is simply not instantiated.
-- No `UP_UE_ID`? A deterministic UE ID is derived from the executable name.
-- No `UP_AUTHORITY`? Defaults to `local_ecu` for single-node development.
+Cloud transports and configurations are bypassed gracefully if not requested or missing, ensuring the application remains functional in offline/local-only scenarios.
+

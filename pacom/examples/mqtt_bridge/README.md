@@ -1,94 +1,30 @@
-# MQTT + SOME/IP bridge example
+# Esempio mqtt_bridge
 
-This example demonstrates all PACOM layers together:
+Esempio completo con tre app:
+1. `light_dashboard` (HMI locale)
+2. `light_switch` (controller locale + bridge cloud)
+3. `cloud_app` (client cloud MQTT)
 
-- interactive edge app publishes on SOME/IP,
-- hub app bridges SOME/IP -> MQTT,
-- hub app bridges MQTT command -> SOME/IP,
-- probe app listens on MQTT and prints payloads.
+## Flussi principali
 
-All apps use only the high-level `PacomRuntime` API.
+- Dashboard -> Switch: RPC su `/rpc/lights/set`
+- Switch -> Dashboard: topic `/status/lights`
+- Cloud app -> Switch: topic `/cloud/command` con authority target `ecu-switch`
+- Switch -> Cloud app: topic `/cloud/telemetry`
 
-## Files
+## Note operative importanti
 
-- `edge/main.rs`: interactive SOME/IP producer + SOME/IP consumer.
-- `hub/main.rs`: bidirectional bridge.
-- `probe/main.rs`: MQTT observer for verification.
-- `sender/main.rs`: interactive MQTT command publisher.
-- `edge/manifest.json`: edge logical roles.
-- `hub/manifest.json`: hub logical roles.
-- `probe/manifest.json`: probe logical roles.
-- `sender/manifest.json`: sender logical roles.
+- Lo stato topic locale usa publish standard (non notification).
+- Dashboard puo partire prima o dopo switch: la subscribe viene agganciata via discovery reannounce.
+- Gli eventi sono live: se un consumer non era attivo, non c'e replay automatico del vecchio evento.
+- Il primo comando cloud puo essere perso se inviato troppo presto (race di startup). Attendere bootstrap o implementare gating ready lato cloud app.
 
-## Run (local)
+## Esecuzione rapida
 
-1. Start a broker (Mosquitto):
+Avvia i tre container con i README di deploy in questa cartella.
 
-```bash
-sudo apt-get update && sudo apt-get install -y mosquitto mosquitto-clients
-mosquitto -v
-```
+## Verifica minima
 
-2. Start hub:
-
-```bash
-PACOM_MQTT_BROKER_URI=mqtt://127.0.0.1:1883 \
-UP_AUTHORITY=ecu-hub UP_UE_ID=0x3301 \
-PACOM_MANIFEST_PATH=examples/mqtt_bridge/hub/manifest.json \
-PACOM_CLOUD_UE_ID=0x2200 \
-cargo run --example mqtt_bridge_hub
-```
-
-3. Start probe:
-
-```bash
-PACOM_MQTT_BROKER_URI=mqtt://127.0.0.1:1883 \
-UP_AUTHORITY=ecu-probe UP_UE_ID=0x3303 \
-PACOM_MANIFEST_PATH=examples/mqtt_bridge/probe/manifest.json \
-PACOM_CLOUD_UE_ID=0x2200 \
-cargo run --example mqtt_bridge_probe
-```
-
-4. Start MQTT sender (for reverse flow MQTT -> SOME/IP):
-
-```bash
-PACOM_MQTT_BROKER_URI=mqtt://127.0.0.1:1883 \
-UP_AUTHORITY=ecu-sender UP_UE_ID=0x3304 \
-PACOM_MANIFEST_PATH=examples/mqtt_bridge/sender/manifest.json \
-cargo run --example mqtt_bridge_sender
-```
-
-5. Start edge interactive app:
-
-```bash
-UP_AUTHORITY=ecu-edge UP_UE_ID=0x3302 \
-PACOM_MANIFEST_PATH=examples/mqtt_bridge/edge/manifest.json \
-cargo run --example mqtt_bridge_edge
-```
-
-6. In edge terminal type any text and press Enter.
-
-Expected:
-
-- edge sends SOME/IP `/bridge/up`,
-- hub forwards to MQTT upstream URI,
-- probe prints `[PROBE:UPSTREAM] ...`.
-
-7. In sender terminal type a command and press Enter.
-
-Expected reverse flow:
-
-- sender publishes MQTT command,
-- hub receives MQTT command and forwards to SOME/IP `/bridge/down`,
-- edge prints `[EDGE] received from hub: ...`.
-
-Optional external verification tools:
-
-- Broker: `mosquitto`.
-- CLI tools: `mosquitto-clients`.
-
-Install on Ubuntu:
-
-```bash
-sudo apt-get update && sudo apt-get install -y mosquitto mosquitto-clients
-```
+1. invia comando dal dashboard e verifica update locale
+2. invia comando dal cloud app e verifica update su switch e dashboard
+3. verifica telemetria cloud

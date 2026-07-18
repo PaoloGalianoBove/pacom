@@ -1,6 +1,10 @@
 {
+  "rpc": {
+    "provide": ["/rpc/lights/set"],
+    "consume": []
+  },
   "topics": {
-    "publish": ["/bridge/down", "/cloud/upstream"],
-    "subscribe": ["/bridge/up", "/cloud/command"]
+    "publish": ["/status/lights", "/cloud/telemetry"],
+    "subscribe": ["/cloud/command"]
   }
 }

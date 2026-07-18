@@ -30,17 +30,14 @@ name = "rtt_client"
 path = "examples/rtt/client/main.rs"
 
 [[example]]
-name = "mqtt_bridge_edge"
-path = "examples/mqtt_bridge/edge/main.rs"
+name = "light_dashboard"
+path = "examples/mqtt_bridge/light-dashboard/main.rs"
 
 [[example]]
-name = "mqtt_bridge_hub"
-path = "examples/mqtt_bridge/hub/main.rs"
+name = "light_switch"
+path = "examples/mqtt_bridge/light-switch/main.rs"
 
 [[example]]
-name = "mqtt_bridge_probe"
-path = "examples/mqtt_bridge/probe/main.rs"
+name = "cloud_app"
+path = "examples/mqtt_bridge/cloud-app/main.rs"
 
-[[example]]
-name = "mqtt_bridge_sender"
-path = "examples/mqtt_bridge/sender/main.rs"

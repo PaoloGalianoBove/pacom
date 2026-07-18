@@ -1,5 +1,10 @@
 {
+  "rpc": {
+    "provide": [],
+    "consume": []
+  },
   "topics": {
-    "publish": ["/cloud/command"]
+    "publish": ["/cloud/command"],
+    "subscribe": ["/cloud/telemetry"]
   }
 }

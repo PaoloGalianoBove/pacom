@@ -47,15 +47,13 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/examples/rtt_server /opt/pacom/bin/rtt_server
 COPY --from=builder /app/target/release/examples/rtt_client /opt/pacom/bin/rtt_client
-COPY --from=builder /app/target/release/examples/mqtt_bridge_hub /opt/pacom/bin/mqtt_bridge_hub
-COPY --from=builder /app/target/release/examples/mqtt_bridge_edge /opt/pacom/bin/mqtt_bridge_edge
-COPY --from=builder /app/target/release/examples/mqtt_bridge_probe /opt/pacom/bin/mqtt_bridge_probe
-COPY --from=builder /app/target/release/examples/mqtt_bridge_sender /opt/pacom/bin/mqtt_bridge_sender
+COPY --from=builder /app/target/release/examples/light_switch /opt/pacom/bin/light_switch
+COPY --from=builder /app/target/release/examples/light_dashboard /opt/pacom/bin/light_dashboard
+COPY --from=builder /app/target/release/examples/cloud_app /opt/pacom/bin/cloud_app
 COPY --from=builder /app/examples /opt/pacom/examples
 COPY --from=builder /tmp/vsomeip-libs/ /usr/local/lib/
-COPY docker/entrypoint.sh /opt/pacom/entrypoint.sh
 
-RUN chmod +x /opt/pacom/entrypoint.sh \
-    && ldconfig
+RUN ldconfig
 
-ENTRYPOINT ["/opt/pacom/entrypoint.sh"]
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
