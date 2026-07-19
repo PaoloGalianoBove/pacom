@@ -8,10 +8,11 @@ pub struct RttClientApp {
 
 impl RttClientApp {
     pub async fn new(manifest_path: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let runtime = PacomRuntime::new(RuntimeConfig { 
+        let runtime = PacomRuntime::new(RuntimeConfig {
             mqtt_config: None,
             manifest_path: Some(manifest_path),
-        }).await?;
+        })
+        .await?;
         println!("[CLIENT] PacomRuntime created.");
         Ok(Self { runtime })
     }

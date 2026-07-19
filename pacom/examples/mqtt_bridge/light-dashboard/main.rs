@@ -1,6 +1,6 @@
 use pacom::{PacomRuntime, RuntimeConfig};
-use tokio::io::{self, AsyncBufReadExt, BufReader};
 use std::sync::{Arc, RwLock};
+use tokio::io::{self, AsyncBufReadExt, BufReader};
 
 const RPC_SET_LIGHTS: &str = "/rpc/lights/set";
 const TOPIC_STATUS: &str = "/status/lights";
@@ -16,24 +16,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[DASHBOARD] Inizializzazione runtime (solo locale SOME/IP)...");
     let runtime = Arc::new(
-        PacomRuntime::new(RuntimeConfig { 
+        PacomRuntime::new(RuntimeConfig {
             mqtt_config: None,
             manifest_path: Some(manifest_path),
-        }).await?
+        })
+        .await?,
     );
 
     let current_status = Arc::new(RwLock::new("Off".to_string()));
 
-    // Sottoscrizione asincrona agli aggiornamenti di stato
+    // La subscribe allo stato e obbligatoria: serve a riflettere anche
+    // i comandi provenienti dal cloud e non solo le risposte RPC locali.
     let current_status_clone = current_status.clone();
-    runtime.subscribe_event(TOPIC_STATUS, move |payload| {
-        let status = String::from_utf8_lossy(&payload).into_owned();
-        if let Ok(mut lock) = current_status_clone.write() {
-            *lock = status.clone();
-        }
-        println!("\n[DASHBOARD - RICEVUTO AGGIORNAMENTO] Stato luci cambiato in: {}", status);
-        print_menu(&status);
-    }).await?;
+    runtime
+        .subscribe_event(TOPIC_STATUS, move |payload| {
+            let status = String::from_utf8_lossy(&payload).into_owned();
+            if let Ok(mut lock) = current_status_clone.write() {
+                *lock = status.clone();
+            }
+            println!(
+                "\n[DASHBOARD - RICEVUTO AGGIORNAMENTO] Stato luci cambiato in: {}",
+                status
+            );
+            print_menu(&status);
+        })
+        .await?;
+    println!("[DASHBOARD] Subscribe stato locale abilitata.");
 
     // Stampa iniziale del menu
     {
@@ -58,18 +66,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if let Some(cmd_str) = cmd {
-            println!("[DASHBOARD] Invio comando RPC '{}' a light_switch...", cmd_str);
-            match runtime.invoke_method(RPC_SET_LIGHTS, cmd_str.as_bytes().to_vec()).await {
+            println!(
+                "[DASHBOARD] Invio comando RPC '{}' a light_switch...",
+                cmd_str
+            );
+            match runtime
+                .invoke_method(RPC_SET_LIGHTS, cmd_str.as_bytes().to_vec())
+                .await
+            {
                 Ok(resp) => {
                     let confirmed_status = String::from_utf8_lossy(&resp).into_owned();
-                    println!("[DASHBOARD] Risposta RPC da light_switch: Stato impostato a '{}'", confirmed_status);
+                    println!(
+                        "[DASHBOARD] Risposta RPC da light_switch: Stato impostato a '{}'",
+                        confirmed_status
+                    );
                     if let Ok(mut lock) = current_status.write() {
                         *lock = confirmed_status.clone();
                     }
                     print_menu(&confirmed_status);
                 }
                 Err(e) => {
-                    eprintln!("[DASHBOARD - ERRORE RPC] Impossibile inviare comando: {}", e);
+                    eprintln!(
+                        "[DASHBOARD - ERRORE RPC] Impossibile inviare comando: {}",
+                        e
+                    );
                 }
             }
         } else {

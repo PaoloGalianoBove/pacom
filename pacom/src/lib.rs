@@ -10,4 +10,4 @@ mod transport;
 // Re-export the public API and core runtime types at the crate root.
 pub use error::PacomError;
 pub use public_api::PacomRuntime;
-pub use runtime::{RuntimeConfig, MqttConfig, ManifestConfig};
+pub use runtime::{ManifestConfig, MqttConfig, RuntimeConfig};

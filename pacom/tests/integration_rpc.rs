@@ -1,6 +1,6 @@
+use std::process::Command;
 use std::time::Duration;
 use tokio::time::sleep;
-use std::process::Command;
 
 /// Integration test that spans a full RPC roundtrip.
 /// Requires vSomeIP routing manager to be active, or will fail/timeout.
@@ -39,6 +39,15 @@ async fn test_rpc_echo_roundtrip() {
     let stderr = String::from_utf8_lossy(&client_output.stderr);
 
     // Ensure the client executed successfully and completed the benchmark
-    assert!(client_output.status.success(), "Client failed! Stdout:\n{}\nStderr:\n{}", stdout, stderr);
-    assert!(stdout.contains("RTT measurements written to rtt_measurements.csv") || stdout.contains("RTT="), "Benchmark did not complete successfully");
+    assert!(
+        client_output.status.success(),
+        "Client failed! Stdout:\n{}\nStderr:\n{}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("RTT measurements written to rtt_measurements.csv")
+            || stdout.contains("RTT="),
+        "Benchmark did not complete successfully"
+    );
 }

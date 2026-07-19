@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use serde::Deserialize;
 use crate::error::PacomError;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RpcManifest {
@@ -121,7 +121,12 @@ impl ManifestConfig {
 
     fn check_topic_collisions(&self) -> Result<(), PacomError> {
         let mut seen: HashMap<u16, &str> = HashMap::new();
-        for name in self.topics.publish.iter().chain(self.topics.subscribe.iter()) {
+        for name in self
+            .topics
+            .publish
+            .iter()
+            .chain(self.topics.subscribe.iter())
+        {
             let id = self.resource_id_for(name);
             if let Some(&existing) = seen.get(&id) {
                 if existing != name.as_str() {

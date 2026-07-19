@@ -1,12 +1,12 @@
+use log::info;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::net::UdpSocket;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use std::net::UdpSocket;
-use log::info;
-use up_rust::{UUri, UStatus, UCode};
+use up_rust::{UCode, UStatus, UUri};
 use up_transport_vsomeip::UPTransportVsomeip;
 
 const IPC_DIR: &str = "/tmp/vsomeip-ipc";
@@ -15,6 +15,309 @@ const LOCK_FILE: &str = "/tmp/vsomeip-ipc/router.lock";
 const ROUTER_NAME: &str = "vsomeip-router";
 const DEFAULT_LOCK_STALE_MS: u64 = 8_000;
 const DEFAULT_ELECTION_WAIT_MS: u64 = 4_000;
+const DEFAULT_RPC_UNRELIABLE_PORT: u16 = 30509;
+const DEFAULT_RPC_RELIABLE_PORT: u16 = 30509;
+const DEFAULT_DISCOVERY_UNRELIABLE_PORT: u16 = 30510;
+const DEFAULT_TOPIC_PUBLISH_UNRELIABLE_PORT: u16 = 30511;
+
+fn discovery_service_id_for(ue_id: u16) -> u16 {
+    0x0F00u16 + (ue_id % 16)
+}
+
+fn topic_publish_service_id_for(ue_id: u16) -> u16 {
+    let mut topic_ue = ue_id ^ 0x4000;
+    if topic_ue == 0 || topic_ue == 0xFFFF {
+        topic_ue ^= 0x2000;
+    }
+    topic_ue
+}
+
+fn normalize_hex_u16(value: u16) -> String {
+    format!("0x{:04x}", value)
+}
+
+fn normalize_service_port_from_env(var: &str, default: u16) -> u16 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(default)
+}
+
+fn env_flag_enabled(var: &str, default: bool) -> bool {
+    std::env::var(var)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(default)
+}
+
+fn env_string_non_empty(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String, UStatus> {
+    let auto_fix_enabled = env_flag_enabled("PACOM_VSOMEIP_AUTO_EXPOSE_SERVICES", true);
+    let rpc_tcp_only = env_flag_enabled("PACOM_VSOMEIP_RPC_TCP_ONLY", true);
+    let expose_topic_publish_service =
+        env_flag_enabled("PACOM_VSOMEIP_EXPOSE_TOPIC_PUBLISH_SERVICE", true);
+    let self_routing_enabled = env_flag_enabled("PACOM_VSOMEIP_SELF_ROUTING", true);
+    let logging_level_override = env_string_non_empty("PACOM_VSOMEIP_LOG_LEVEL");
+
+    if !auto_fix_enabled {
+        dbg_log("Auto service exposure disabled via PACOM_VSOMEIP_AUTO_EXPOSE_SERVICES");
+        return Ok(config_path.to_string());
+    }
+
+    let raw = std::fs::read_to_string(config_path).map_err(|e| {
+        UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!("Failed to read vSomeIP config '{}': {e}", config_path),
+        )
+    })?;
+
+    let mut json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            format!("Invalid JSON in vSomeIP config '{}': {e}", config_path),
+        )
+    })?;
+
+    let rpc_service_hex = normalize_hex_u16(ue_id);
+    let topic_publish_service_hex = normalize_hex_u16(topic_publish_service_id_for(ue_id));
+    let discovery_service_hex = normalize_hex_u16(discovery_service_id_for(ue_id));
+    let rpc_port =
+        normalize_service_port_from_env("PACOM_VSOMEIP_RPC_PORT", DEFAULT_RPC_UNRELIABLE_PORT);
+    let rpc_reliable_port = normalize_service_port_from_env(
+        "PACOM_VSOMEIP_RPC_RELIABLE_PORT",
+        DEFAULT_RPC_RELIABLE_PORT,
+    );
+    let topic_publish_port = normalize_service_port_from_env(
+        "PACOM_VSOMEIP_TOPIC_PUBLISH_PORT",
+        DEFAULT_TOPIC_PUBLISH_UNRELIABLE_PORT,
+    );
+    let discovery_port = normalize_service_port_from_env(
+        "PACOM_VSOMEIP_DISCOVERY_PORT",
+        DEFAULT_DISCOVERY_UNRELIABLE_PORT,
+    );
+
+    let mut modified = false;
+
+    let root = json.as_object_mut().ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            format!("vSomeIP config '{}' must be a JSON object", config_path),
+        )
+    })?;
+
+    if self_routing_enabled {
+        let app_name = std::env::var("APP_NAME").unwrap_or_else(|_| format!("app-0x{:04x}", ue_id));
+        let app_id_hex = std::env::var("APP_ID_HEX").unwrap_or_else(|_| normalize_hex_u16(ue_id));
+
+        root.insert(
+            "applications".to_string(),
+            serde_json::json!([
+                {
+                    "name": app_name,
+                    "id": app_id_hex,
+                }
+            ]),
+        );
+        root.insert("routing".to_string(), serde_json::Value::String(app_name));
+        modified = true;
+    }
+
+    if let Some(level) = logging_level_override {
+        let logging = root
+            .entry("logging")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(logging_obj) = logging.as_object_mut() {
+            let current = logging_obj
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if current != level {
+                logging_obj.insert("level".to_string(), serde_json::Value::String(level));
+                modified = true;
+            }
+        }
+    }
+
+    let services = root
+        .entry("services")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or_else(|| {
+            UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                format!(
+                    "vSomeIP config '{}' has non-array 'services' field",
+                    config_path
+                ),
+            )
+        })?;
+
+    let mut has_rpc = false;
+    let mut has_topic_publish = false;
+    let mut has_discovery = false;
+
+    for service in services.iter_mut() {
+        if let Some(sid) = service.get("service").and_then(|v| v.as_str()) {
+            let sid = sid.to_ascii_lowercase();
+            if sid == rpc_service_hex {
+                has_rpc = true;
+                if let Some(obj) = service.as_object_mut() {
+                    if !obj.contains_key("reliable") {
+                        obj.insert(
+                            "reliable".to_string(),
+                            serde_json::Value::String(rpc_reliable_port.to_string()),
+                        );
+                        modified = true;
+                    }
+                    if rpc_tcp_only {
+                        if obj.remove("unreliable").is_some() {
+                            modified = true;
+                        }
+                    } else if !obj.contains_key("unreliable") {
+                        obj.insert(
+                            "unreliable".to_string(),
+                            serde_json::Value::String(rpc_port.to_string()),
+                        );
+                        modified = true;
+                    }
+                }
+            }
+            if expose_topic_publish_service && sid == topic_publish_service_hex {
+                has_topic_publish = true;
+                if let Some(obj) = service.as_object_mut() {
+                    // Topic publish is event-oriented; keep it UDP-only to avoid
+                    // mixing an unnecessary reliable path with RPC response traffic.
+                    if obj.remove("reliable").is_some() {
+                        modified = true;
+                    }
+                    let expected = topic_publish_port.to_string();
+                    let current = obj
+                        .get("unreliable")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if current != expected {
+                        obj.insert(
+                            "unreliable".to_string(),
+                            serde_json::Value::String(expected),
+                        );
+                        modified = true;
+                    }
+                }
+            }
+            if sid == discovery_service_hex {
+                has_discovery = true;
+            }
+        }
+    }
+
+    if !has_rpc {
+        let rpc_service = if rpc_tcp_only {
+            serde_json::json!({
+                "service": rpc_service_hex,
+                "instance": "0x0001",
+                "reliable": rpc_reliable_port.to_string()
+            })
+        } else {
+            serde_json::json!({
+                "service": rpc_service_hex,
+                "instance": "0x0001",
+                "unreliable": rpc_port.to_string(),
+                "reliable": rpc_reliable_port.to_string()
+            })
+        };
+        services.push(rpc_service);
+        modified = true;
+    }
+
+    if expose_topic_publish_service && !has_topic_publish {
+        services.push(serde_json::json!({
+            "service": topic_publish_service_hex,
+            "instance": "0x0001",
+            "unreliable": topic_publish_port.to_string()
+        }));
+        modified = true;
+    }
+
+    if !has_discovery {
+        services.push(serde_json::json!({
+            "service": discovery_service_hex,
+            "instance": "0x0001",
+            "unreliable": discovery_port.to_string(),
+            "events": [
+                {
+                    "event": "0x8f01",
+                    "is_field": "false",
+                    "is_reliable": "false"
+                }
+            ],
+            "eventgroups": [
+                {
+                    "eventgroup": "0x0001",
+                    "events": ["0x8f01"]
+                }
+            ]
+        }));
+        modified = true;
+    }
+
+    if !modified {
+        dbg_log(format!(
+            "vSomeIP config '{}' reused unchanged (rpc={}, rpc_tcp_only={}, topic_publish={}, topic_publish_enabled={}, discovery={}, self_routing={})",
+            config_path,
+            normalize_hex_u16(ue_id),
+            rpc_tcp_only,
+            normalize_hex_u16(topic_publish_service_id_for(ue_id)),
+            expose_topic_publish_service,
+            normalize_hex_u16(discovery_service_id_for(ue_id)),
+            self_routing_enabled
+        ));
+        return Ok(config_path.to_string());
+    }
+
+    let effective_path = format!("/tmp/pacom-vsomeip.effective.{}.json", ue_id);
+    let serialized = serde_json::to_string_pretty(&json).map_err(|e| {
+        UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!("Failed to serialize effective vSomeIP config: {e}"),
+        )
+    })?;
+
+    std::fs::write(&effective_path, serialized).map_err(|e| {
+        UStatus::fail_with_code(
+            UCode::INTERNAL,
+            format!(
+                "Failed to write effective vSomeIP config '{}': {e}",
+                effective_path
+            ),
+        )
+    })?;
+
+    dbg_log(format!(
+        "vSomeIP effective config written to '{}' (rpc={}, rpc_tcp_only={}, topic_publish={}, topic_publish_enabled={}, discovery={}, rpc_port={}, rpc_reliable_port={}, topic_publish_port={}, discovery_port={}, self_routing={})",
+        effective_path,
+        normalize_hex_u16(ue_id),
+        rpc_tcp_only,
+        normalize_hex_u16(topic_publish_service_id_for(ue_id)),
+        expose_topic_publish_service,
+        normalize_hex_u16(discovery_service_id_for(ue_id)),
+        rpc_port,
+        rpc_reliable_port,
+        topic_publish_port,
+        discovery_port,
+        self_routing_enabled
+    ));
+
+    Ok(effective_path)
+}
 
 fn verbose_debug_enabled() -> bool {
     std::env::var("PACOM_DEBUG_VERBOSE")
@@ -49,15 +352,16 @@ pub async fn setup_vsomeip_transport(
 
     // If a configuration path is explicitly provided, use it as-is.
     if let Ok(config_path) = std::env::var("PACOM_VSOMEIP_CONFIG_PATH") {
+        let effective_config_path = maybe_autofix_config_services(&config_path, ue_id)?;
         dbg_log(format!(
-            "Using PACOM_VSOMEIP_CONFIG_PATH='{}' for UE=0x{:04x}, authority='{}'",
-            config_path, ue_id, authority
+            "Using PACOM_VSOMEIP_CONFIG_PATH='{}' (effective='{}') for UE=0x{:04x}, authority='{}'",
+            config_path, effective_config_path, ue_id, authority
         ));
         unsafe {
-            std::env::set_var("VSOMEIP_CONFIGURATION", &config_path);
+            std::env::set_var("VSOMEIP_CONFIGURATION", &effective_config_path);
         }
 
-        let local_uri = UUri::try_from_parts(authority, ue_id as u32, 0, 0).map_err(|e| {
+        let local_uri = UUri::try_from_parts(authority, ue_id as u32, 1, 0).map_err(|e| {
             UStatus::fail_with_code(
                 UCode::INVALID_ARGUMENT,
                 format!("Failed to build local UUri: {e:?}"),
@@ -67,9 +371,10 @@ pub async fn setup_vsomeip_transport(
         let transport = UPTransportVsomeip::new_with_config(
             local_uri,
             &authority.to_string(),
-            &std::path::PathBuf::from(config_path),
+            &std::path::PathBuf::from(effective_config_path),
             None,
-        ).map_err(|e| {
+        )
+        .map_err(|e| {
             UStatus::fail_with_code(
                 UCode::INTERNAL,
                 format!("Failed to build UPTransportVsomeip from PACOM_VSOMEIP_CONFIG_PATH: {e:?}"),
@@ -81,11 +386,12 @@ pub async fn setup_vsomeip_transport(
 
     // Honor VSOMEIP_CONFIGURATION if already set by the container runtime.
     if let Ok(config_path) = std::env::var("VSOMEIP_CONFIGURATION") {
+        let effective_config_path = maybe_autofix_config_services(&config_path, ue_id)?;
         dbg_log(format!(
-            "Using existing VSOMEIP_CONFIGURATION='{}' for UE=0x{:04x}, authority='{}'",
-            config_path, ue_id, authority
+            "Using existing VSOMEIP_CONFIGURATION='{}' (effective='{}') for UE=0x{:04x}, authority='{}'",
+            config_path, effective_config_path, ue_id, authority
         ));
-        let local_uri = UUri::try_from_parts(authority, ue_id as u32, 0, 0).map_err(|e| {
+        let local_uri = UUri::try_from_parts(authority, ue_id as u32, 1, 0).map_err(|e| {
             UStatus::fail_with_code(
                 UCode::INVALID_ARGUMENT,
                 format!("Failed to build local UUri: {e:?}"),
@@ -95,9 +401,10 @@ pub async fn setup_vsomeip_transport(
         let transport = UPTransportVsomeip::new_with_config(
             local_uri,
             &authority.to_string(),
-            &std::path::PathBuf::from(config_path),
+            &std::path::PathBuf::from(effective_config_path),
             None,
-        ).map_err(|e| {
+        )
+        .map_err(|e| {
             UStatus::fail_with_code(
                 UCode::INTERNAL,
                 format!("Failed to build UPTransportVsomeip from VSOMEIP_CONFIGURATION: {e:?}"),
@@ -133,7 +440,10 @@ pub async fn setup_vsomeip_transport(
         format!("app-0x{:04x}", ue_id)
     };
 
-    info!("[vSomeIP] Initializing as {} (is_router={})", app_name, is_router);
+    info!(
+        "[vSomeIP] Initializing as {} (is_router={})",
+        app_name, is_router
+    );
 
     // 3. Dynamically detect our local IP address
     let ecu_ip = get_local_ip();
@@ -179,6 +489,7 @@ pub async fn setup_vsomeip_transport(
                     "id": format!("0x{:04x}", ue_id)
                 }
             ],
+            // Client instances must target the shared router app.
             "routing": ROUTER_NAME,
             "service-discovery": {
                 "enable": "true",
@@ -201,7 +512,10 @@ pub async fn setup_vsomeip_transport(
         )
     })?;
     if verbose_debug_enabled() {
-        dbg_log(format!("Generated vSomeIP JSON config content:\n{}", config_content));
+        dbg_log(format!(
+            "Generated vSomeIP JSON config content:\n{}",
+            config_content
+        ));
     }
 
     let mut file = File::create(&config_path).map_err(|e| {
@@ -216,11 +530,20 @@ pub async fn setup_vsomeip_transport(
             format!("Failed to write vsomeip config: {e}"),
         )
     })?;
-    dbg_log(format!("Generated dynamic vSomeIP config at '{}'", config_path));
+    dbg_log(format!(
+        "Generated dynamic vSomeIP config at '{}'",
+        config_path
+    ));
+
+    let effective_config_path = maybe_autofix_config_services(&config_path, ue_id)?;
+    dbg_log(format!(
+        "Using generated config '{}' (effective='{}')",
+        config_path, effective_config_path
+    ));
 
     // 5. Set the environment variable for vSomeIP engine
     unsafe {
-        std::env::set_var("VSOMEIP_CONFIGURATION", &config_path);
+        std::env::set_var("VSOMEIP_CONFIGURATION", &effective_config_path);
     }
 
     // 6. Instantiate UPTransportVsomeip
@@ -234,9 +557,10 @@ pub async fn setup_vsomeip_transport(
     let transport = UPTransportVsomeip::new_with_config(
         local_uri,
         &authority.to_string(),
-        &std::path::PathBuf::from(config_path),
+        &std::path::PathBuf::from(effective_config_path),
         None,
-    ).map_err(|e| {
+    )
+    .map_err(|e| {
         UStatus::fail_with_code(
             UCode::INTERNAL,
             format!("Failed to build UPTransportVsomeip: {e:?}"),
@@ -255,7 +579,10 @@ fn get_local_ip() -> String {
         if socket.connect("8.8.8.8:80").is_ok() {
             dbg_log("get_local_ip: UDP connect to 8.8.8.8:80 succeeded");
             if let Ok(local_addr) = socket.local_addr() {
-                dbg_log(format!("get_local_ip: selected local IP {}", local_addr.ip()));
+                dbg_log(format!(
+                    "get_local_ip: selected local IP {}",
+                    local_addr.ip()
+                ));
                 return local_addr.ip().to_string();
             }
             dbg_log("get_local_ip: local_addr() failed after connect");
@@ -371,10 +698,18 @@ fn become_router_after_lock() -> bool {
 }
 
 fn try_acquire_router_lock() -> bool {
-    match OpenOptions::new().write(true).create_new(true).open(LOCK_FILE) {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(LOCK_FILE)
+    {
         Ok(mut file) => {
             let _ = writeln!(file, "pid={}", std::process::id());
-            dbg_log(format!("Lock acquired and stamped pid={} at {}", std::process::id(), LOCK_FILE));
+            dbg_log(format!(
+                "Lock acquired and stamped pid={} at {}",
+                std::process::id(),
+                LOCK_FILE
+            ));
             true
         }
         Err(e) => {
@@ -455,7 +790,10 @@ fn lock_owner_is_dead(path: &str) -> bool {
 
 fn socket_is_alive(path: &str) -> bool {
     if !Path::new(path).exists() {
-        dbg_log(format!("socket_is_alive('{}')=false reason=path_missing", path));
+        dbg_log(format!(
+            "socket_is_alive('{}')=false reason=path_missing",
+            path
+        ));
         return false;
     }
     // Attempt a brief connection to check if it's alive

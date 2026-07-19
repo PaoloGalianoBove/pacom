@@ -52,8 +52,11 @@ COPY --from=builder /app/target/release/examples/light_dashboard /opt/pacom/bin/
 COPY --from=builder /app/target/release/examples/cloud_app /opt/pacom/bin/cloud_app
 COPY --from=builder /app/examples /opt/pacom/examples
 COPY --from=builder /tmp/vsomeip-libs/ /usr/local/lib/
+COPY docker/entrypoint.sh /opt/pacom/bin/entrypoint.sh
 
-RUN ldconfig
+RUN ldconfig && chmod +x /opt/pacom/bin/entrypoint.sh
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
+
+ENTRYPOINT ["/opt/pacom/bin/entrypoint.sh"]
 

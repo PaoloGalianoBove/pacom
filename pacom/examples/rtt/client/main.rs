@@ -18,7 +18,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    println!("Starting pacom RPC Client (benchmark: {} iterations)...", NUM_REQUESTS);
+    println!(
+        "Starting pacom RPC Client (benchmark: {} iterations)...",
+        NUM_REQUESTS
+    );
     let client = RttClientApp::new(manifest_path).await?;
     let sampler = PerformanceSampler::start();
 

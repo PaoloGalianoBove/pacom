@@ -76,7 +76,7 @@ if mount | grep "on /tmp" > /dev/null; then
     echo "[ENTRYPOINT] Found existing vSomeIP IPC sockets in /tmp"
   fi
 else
-  echo "[ENTRYPOINT] WARNING: /tmp is NOT a shared volume. Single-ECU multi-container communication via vSomeIP will fail without host networking."
+  echo "[ENTRYPOINT] /tmp is NOT a shared volume. This disables same-host IPC optimization only; network-based vSomeIP communication remains supported."
 fi
 
 exec "/opt/pacom/bin/${APP_BIN}"

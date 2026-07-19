@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use up_rust::{UStatus, UCode};
+use up_rust::{UCode, UStatus};
 use up_transport_mqtt5::{Mqtt5Transport, Mqtt5TransportOptions, MqttClientOptions, TransportMode};
 
 /// Configures and instantiates the official uProtocol MQTT 5 transport.

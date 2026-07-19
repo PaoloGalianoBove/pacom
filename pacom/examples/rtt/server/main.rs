@@ -13,19 +13,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let client = PacomRuntime::new(RuntimeConfig { 
+    let client = PacomRuntime::new(RuntimeConfig {
         mqtt_config: None,
         manifest_path: Some(manifest_path),
-    }).await?;
-    
+    })
+    .await?;
+
     // Register asynchronous RPC handler directly on the runtime using the logical service name
-    client.register_rpc_method(RPC_METHOD, |request_bytes| async move {
-        let msg = String::from_utf8_lossy(&request_bytes).into_owned();
-        println!("[SERVER] Received RPC request: {}", msg);
-        format!("Echo: {}", msg).into_bytes()
-    }).await?;
-    
-    println!("[SERVER] Endpoint registered for '{}'. Listening...", RPC_METHOD);
+    client
+        .register_rpc_method(RPC_METHOD, |request_bytes| async move {
+            let msg = String::from_utf8_lossy(&request_bytes).into_owned();
+            println!("[SERVER] Received RPC request: {}", msg);
+            format!("Echo: {}", msg).into_bytes()
+        })
+        .await?;
+
+    println!(
+        "[SERVER] Endpoint registered for '{}'. Listening...",
+        RPC_METHOD
+    );
 
     // Keep alive
     std::thread::park();
