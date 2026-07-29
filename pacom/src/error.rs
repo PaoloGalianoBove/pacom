@@ -1,4 +1,4 @@
-use up_rust::UStatus;
+use up_rust::{UCode, UStatus};
 
 /// Unified error type for all PACOM runtime operations.
 ///
@@ -46,4 +46,17 @@ pub enum PacomError {
     /// An RPC invocation returned an empty response payload.
     #[error("RPC returned empty response")]
     EmptyResponse,
+}
+
+impl From<PacomError> for UStatus {
+    fn from(error: PacomError) -> Self {
+        match error {
+            PacomError::Transport(status) => status,
+            PacomError::ManifestViolation { .. } => UStatus::fail_with_code(UCode::PERMISSION_DENIED, error.to_string()),
+            PacomError::DiscoveryTimeout { .. } => UStatus::fail_with_code(UCode::DEADLINE_EXCEEDED, error.to_string()),
+            PacomError::Config(_) => UStatus::fail_with_code(UCode::INTERNAL, error.to_string()),
+            PacomError::IdCollision { .. } => UStatus::fail_with_code(UCode::ALREADY_EXISTS, error.to_string()),
+            PacomError::EmptyResponse => UStatus::fail_with_code(UCode::NOT_FOUND, error.to_string()),
+        }
+    }
 }

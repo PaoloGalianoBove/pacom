@@ -1,45 +1,24 @@
-# Modulo transport
+# Modulo Transport (`transport/`)
 
-Il modulo transport implementa i bridge di rete e il routing tra percorsi locali e cloud.
+Il modulo `transport` contiene l'implementazione fisica della rete. Si occupa di inizializzare le librerie di base (vSomeIP e MQTT) e instradarvi i messaggi (UTransport routing).
 
-## vsomeip.rs
+## 1. `router.rs` (`PacomRouter`)
+Il cuore dell'instradamento di rete. Implementa il trait `UTransport` richiesto dallo standard `up-rust`.
 
-Responsabilita principali:
-1. setup dinamico configurazione vSomeIP
-2. role election router/client su host condiviso
-3. gestione lock/socket stale e bootstrap robusto in container
+### Funzionamento Principale:
+- Riceve ogni singolo pacchetto (UMessage) inviato dall'applicazione.
+- **`is_cloud_bound(uri)`**: Metodo fondamentale. Controlla l'authority del pacchetto. Se il campo "Authority" è vuoto o ha un asterisco `*`, significa che il pacchetto è locale (intra-vehicle) e va inoltrato al driver vSomeIP. Se invece presenta un'authority marcata (es. una stringa FQDN), il pacchetto è diretto al cloud e va inoltrato al driver MQTT5.
+- Svolge il delicatissimo compito di coordinare il `register_listener` tra due mondi concettualmente diversi (Pub/Sub via MQTT contro Servizi/Istanze via vSomeIP).
 
-Variabili utili:
-- `PACOM_VSOMEIP_CONFIG_PATH`
-- `VSOMEIP_CONFIGURATION`
-- `PACOM_VSOMEIP_ROLE`
-- `PACOM_VSOMEIP_LOCK_STALE_MS`
-- `PACOM_VSOMEIP_ELECTION_WAIT_MS`
-- `PACOM_DEBUG_VERBOSE`
+## 2. `vsomeip_topology.rs` (`VsomeipTopologyResolver`)
+Una delle maggiori complessità di uProtocol applicato all'Automotive risiede nell'incompatibilità intrinseca tra la specifica uProtocol (che ammette wildcard come l'asterisco `*` per sottoscriversi a "qualsiasi" entità) e la specifica SOME/IP (che non ammette iscrizioni generiche ma solo IP/ID concreti).
 
-## mqtt.rs
+Questo modulo è incaricato di sporcarsi le mani:
+- **`expand_listener_candidates(...)`**: Prende una stringa uProtocol contenente wildcard ed espande una serie di array `Vec<UUri>` contenenti tutte le possibili istanze concrete (es. Authority vuota, Authority locale). Successivamente, **deduplica** l'array.
+In questo modo, il Router non si troverà mai a registrare due volte la stessa identità vSomeIP (che causerebbe errori a runtime come istanze "0xFF" contrastanti).
 
-Gestisce il trasporto off-vehicle via MQTT 5. E usato in combinazione col router per traffico cloud-bound.
+## 3. `vsomeip.rs` e `mqtt.rs` (I Driver)
+Questi file contengono una logica di interfacciamento quasi nativa per i rispettivi protocolli, gestendo i `Mutex` e i thread asincroni per garantire che le code di ricezione MQTT e i thread di polling C++ di vSomeIP (tramite `up-transport-vsomeip`) girino fluidamente e non blocchino Tokio.
 
-## router.rs
-
-PacomRouter implementa `UTransport` e decide il percorso:
-- locale vSomeIP quando l'URI non e cloud-bound
-- MQTT quando il target e marcato cloud-bound (es. marker cross-domain o wildcard authority-level)
-
-Dettagli importanti:
-- normalizza alcuni source filter locali per evitare registrazioni SOME/IP wildcard ambigue
-- evita candidate wildcard locali per ridurre conflitti di service offer
-- mantiene log diagnostici dettagliati quando `PACOM_DEBUG_VERBOSE=true`
-
-## Invarianti da preservare
-
-- Non riscrivere topic publish locale in notification.
-- Non introdurre mapping case-specific hardcoded per topic singoli.
-- Mantenere coerenza tra routing decision e registrazione listener.
-
-## Contribuire in sicurezza
-
-- isolare sempre i test vSomeIP in processi/container separati
-- evitare cambiamenti distruttivi nel lifecycle FFI
-- verificare ogni modifica con almeno un test locale e uno cloud path
+- In vSomeIP viene eseguita la `role election`: in assenza di un master, il nodo diventerà il master vSomeIP locale.
+- In MQTT, la connessione è governata dal file di configurazione e viene agganciata agli argomenti forniti in `RuntimeConfig`.

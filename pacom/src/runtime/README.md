@@ -1,62 +1,29 @@
-# Modulo runtime
+# Modulo Runtime (`runtime/`)
 
-Il modulo runtime contiene il comportamento operativo di PACOM: validazione manifest, discovery, publish/subscribe e RPC su trasporti multipli.
+Il modulo `runtime` contiene il comportamento operativo "nascosto" di PACOM: validazione del manifesto, traduzione degli indirizzi, meccanismi di Service Discovery, e orchestrazione dei trasporti.
 
-## engine.rs in breve
+## `engine.rs` (Il Cuore dell'Orchestrazione)
 
-RuntimeEngine mantiene:
-- router trasporti (vSomeIP + MQTT)
-- client/server RPC di up-rust
-- cache discovery concorrente
-- capability locali pubblicate (RPC provide + topic publish)
-- pending subscriptions per topic non ancora scoperti
+Il file `engine.rs` espone la struct `RuntimeEngine` (solitamente mascherata da `PacomRuntime` al livello superiore).
 
-## Discovery attuale
+### Funzioni e Strutture di Rilievo:
+- **`DiscoveryCache`**: Una struttura dati thread-safe (`RwLock`) che memorizza tutti i nodi scoperti (RPC Providers e Topic Publishers) associandone il nome logico al loro `UUri` numerico reale.
+- **`DiscoveryListener`**: Un `UListener` specializzato che resta perennemente in ascolto sui 16 canali di uDiscovery. Quando riceve un payload (attualmente formattato in JSON per comodità rapida), aggiorna la `DiscoveryCache`.
+- **`PendingSubscription`**: Qualora l'utente provi a sottoscrivere un topic che non è ancora stato offerto sulla rete da nessuno, PACOM non va in errore ma inserisce la richiesta in pending. Non appena il Local Discovery intercetta il publisher, la subscription viene finalizzata automaticamente sul Router.
 
-PACOM usa un canale discovery interno su URI fissa `0x0F00/0x8F01` (16 canali, selezione per `UP_UE_ID % 16`).
+## `logical_registry.rs` (La Tabella di Routing)
 
-Flusso:
-1. ogni provider annuncia `rpc_provide` e `topic_publish` con payload JSON
-2. i consumer aggiornano una cache locale provider per nome logico
-3. se una subscribe topic era in pending, viene attivata al primo announce
-4. un task periodico (`PACOM_DISCOVERY_REANNOUNCE_SECS`) riannuncia le capability
+Mappa i nomi logici leggibili in ID uProtocol numerici (`u16`) usando un algoritmo di hashing veloce (FNV-1a) a 16 bit. Include forti controlli anti-collisione eseguiti al boot.
 
-Nota importante: per i topic publish, il provider UE-ID annunciato deve coincidere con l'UE-ID realmente usato nel publish.
+### Funzioni di Calcolo (Il "Split" degli ID):
+Per evitare che l'hash di un topic collida inavvertitamente con l'hash di un RPC:
+- **`method_id_for(logical_method)`**: Forza il bit più significativo a `0` (Range: `0x0001..=0x7FFF`).
+- **`resource_id_for(logical_topic)`**: Forza il bit più significativo a `1` (Range: `0x8000..=0xFFFF`).
 
-## Split UE-ID tra RPC e topic publish
+## Il Flusso della Discovery
 
-Per evitare collisioni SOME/IP tra offer RPC e publish topic, il runtime usa:
-- UE-ID applicativo base per RPC
-- UE-ID derivato per topic publish (`derive_topic_publish_ue_id`)
-
-La stessa identità UE topic viene usata sia nel messaggio publish sia negli annunci discovery (iniziali e periodici).
-
-## Startup order e semantica eventi
-
-La discovery rende robusta la registrazione listener anche se il subscriber parte dopo.
-Gli eventi publish restano fire-and-forget: se un subscriber non era attivo nel momento di un evento, quell'evento non viene replayato automaticamente.
-
-## logical_registry.rs
-
-Mappa nomi logici stringa in ID uProtocol numerici con FNV-1a 16 bit e controlla collisioni a startup:
-- range metodi RPC: `0x0001..=0x7FFF`
-- range topic/eventi: `0x8000..=0xFFFF`
-
-In caso di collisione il boot viene bloccato con errore esplicito.
-
-## Variabili utili
-
-- `UP_AUTHORITY`
-- `UP_UE_ID`
-- `PACOM_DISCOVERY_MAX_WAIT_MS`
-- `PACOM_DISCOVERY_POLL_MS`
-- `PACOM_DISCOVERY_REANNOUNCE_SECS`
-- `PACOM_DEBUG_VERBOSE`
-- `PACOM_ENABLE_LOCAL_WILDCARD_SUBSCRIBE`
-
-## Linee guida contributo
-
-- evitare panic/unwrap nel path runtime
-- mantenere coerenza tra identita discovery e identita traffico reale
-- usare log verbose solo sotto `PACOM_DEBUG_VERBOSE`
-- preferire modifiche generali (non case-specific)
+Lo standard uProtocol impone che la Discovery avvenga sul servizio `0x0F00`. Dato l'elevato numero di app veicolari, si usano 16 istanze per bilanciare il carico (`0x0F00` a `0x0F0F`).
+All'avvio, `RuntimeEngine`:
+1. Verifica se l'app consuma/legge dati (dalla configurazione del manifest).
+2. Se sì, fa un `register_listener` massivo sui **16 canali** di discovery per intercettare gli annunci di chiunque.
+3. Inoltre, lancia un task asincrono in background che ogni `PACOM_DISCOVERY_REANNOUNCE_SECS` "urla" sulla rete quali servizi l'app stessa sta fornendo, in modo che eventuali listener avviati in ritardo possano allinearsi.

@@ -1,37 +1,30 @@
-# PACOM source map
+# PACOM: Source Map e Linee Guida
 
-Questo documento riassume come e dove intervenire nel codice sotto `src/`.
+Questo documento funge da mappa dettagliata per orientarsi nel codice sorgente (`src/`) e comprendere le responsabilità di ogni modulo.
 
-## Layer principali
+## 1. `public_api/` (Interfaccia Utente)
+Questa cartella contiene il wrapper asincrono destinato all'utente finale. Tutte le funzioni pubbliche espongono una firma idiomatica in puro Rust.
+- **`PacomRuntime`**: L'oggetto thread-safe (`Arc`-based) che rappresenta il nodo. 
+- Espone funzioni come `subscribe_event`, `publish_event`, e `register_rpc_method`.
+- *Design Decision*: L'uso di normali closure `Fn(Vec<u8>)` maschera completamente i complessi trait asincroni richiesti da `up-rust` (es. `UListener`), rendendo il codice dell'app finale compatto e leggibile.
 
-1. `public_api/`
-   API ad alto livello per applicazioni (`publish`, `subscribe`, `invoke_method`, `register_rpc_method`).
+## 2. `runtime/` (Il Motore Centrale)
+Il cuore operativo che instrada le chiamate e risolve gli identificativi.
+- **`engine.rs (RuntimeEngine)`**: Contiene la logica per allocare il Router, istanziare i Client/Server RPC e gestire il polling del Discovery.
+- **`logical_registry.rs (LogicalRegistry)`**: Effettua il parsing del file `manifest.json`.
+  - *Design Decision (Lo Split degli ID)*: Siccome uProtocol mappa le risorse su 16-bit (`0x0000` a `0xFFFF`), la funzione di calcolo dell'hash divide brutalmente lo spazio per evitare collisioni: la prima metà (`0x0001` - `0x7FFF`) è strettamente riservata agli **RPC**, mentre la seconda (`0x8000` - `0xFFFF`) è riservata ai **Topic**.
 
-2. `runtime/`
-   Motore operativo: validazione manifest, mapping logico->ID, discovery, pending subscriptions e RPC orchestration.
+## 3. `transport/` (I Bridge di Rete)
+Qui vengono materializzati i socket verso l'infrastruttura veicolare e cloud.
+- **`vsomeip.rs`**: Effettua il setup dinamico di vSomeIP e la negoziazione dei ruoli sul nodo.
+- **`mqtt.rs`**: Configura la connessione persistente al broker MQTT5 per i messaggi off-vehicle.
+- **`router.rs (PacomRouter)`**: Un oggetto che implementa l'interfaccia standard `UTransport`. Per ogni messaggio calcola la destinazione tramite `is_cloud_bound` e instrada il payload.
+- **`vsomeip_topology.rs (VsomeipTopologyResolver)`**: Una struttura matematica che protegge il router dalle rigidità di vSomeIP. Poiché vSomeIP andrebbe in crash ricevendo una wildcard (es. `*`), questo modulo converte le iscrizioni wildcard in un array deduplicato di istanze IP concrete.
 
-3. `transport/`
-   Bridge fisici:
-   - `vsomeip.rs` per traffico locale
-   - `mqtt.rs` per traffico cloud
-   - `router.rs` per routing decision tra i due
+## Gestione Errori (`error.rs`)
+Ogni fallimento interno (timeout di discovery, collisioni ID, configurazioni errate) viene intercettato usando la libreria `thiserror` (struttura `PacomError`). 
+Il modulo provvede poi a convertire automaticamente l'errore Rust nativo in un codice `UCode` (es. `DEADLINE_EXCEEDED` o `PERMISSION_DENIED`) compatibile col protocollo uProtocol, garantendo messaggi d'errore puliti nei log.
 
-## Regole operative importanti
-
-- Non cambiare la semantica dei topic locali: topic publish resta publish.
-- Mantieni coerenza tra discovery provider UE-ID e sorgente reale dei messaggi.
-- Per cloud command/event usa le API mirate con authority (`publish_to_authority`, `subscribe_from_authority`).
-- Evita log rumorosi non gated: i log diagnostici devono passare da `PACOM_DEBUG_VERBOSE`.
-
-## Startup behavior da ricordare
-
-- La discovery rende robusto l'attach dei subscriber anche con ordine di startup invertito.
-- Gli eventi publish sono live: niente replay automatico se un consumer era offline.
-- Il primissimo comando cloud puo essere perso se inviato prima che il provider abbia registrato la subscribe cloud.
-
-## Dove cercare in debug
-
-- Issue topic/discovery: `runtime/engine.rs`
-- Routing cloud/local: `transport/router.rs`
-- Startup vSomeIP e role election: `transport/vsomeip.rs`
-- Errori contratto manifest: `runtime/logical_registry.rs` e `error.rs`
+## Regole Operative Importanti
+- **Trasparenza del Topic**: Non cambiare mai la semantica di un Publish locale.
+- **Log Gated**: Evita log rumorosi in produzione. Qualsiasi diagnostica complessa (es. print di pacchetti hex) deve essere condizionata alla variabile `PACOM_DEBUG_VERBOSE=true`.

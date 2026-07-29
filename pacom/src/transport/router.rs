@@ -5,11 +5,17 @@ use up_rust::{UListener, UMessage, UStatus, UTransport, UUri};
 use up_transport_mqtt5::Mqtt5Transport;
 use up_transport_vsomeip::UPTransportVsomeip;
 
+use crate::transport::vsomeip_topology::{
+    is_wildcard_major_version, is_wildcard_resource_id, normalize_uri_for_vsomeip,
+    VsomeipTopologyResolver,
+};
+
 /// Pacom router routing messages between vSomeIP and MQTT transports.
 pub struct PacomRouter {
     authority: String,
     vsomeip: Option<Arc<UPTransportVsomeip>>,
     mqtt: Option<Arc<Mqtt5Transport>>,
+    topology: VsomeipTopologyResolver,
 }
 
 fn verbose_debug_enabled() -> bool {
@@ -53,35 +59,8 @@ fn uri_dbg(uri: &UUri) -> String {
     )
 }
 
-fn is_mqtt_wildcard_ue_id(ue_id: u32) -> bool {
-    ue_id == 0xFFFF || ue_id == u32::MAX
-}
-
-fn is_wildcard_resource_id(resource_id: u32) -> bool {
-    resource_id == 0xFFFF || resource_id == u32::MAX
-}
-
-fn is_wildcard_major_version(major: u32) -> bool {
-    major == 0xFF
-}
-
-fn is_wildcard_source_filter(uri: &UUri) -> bool {
-    let auth = uri.authority_name();
-    (auth.is_empty() || auth == "*") && (is_mqtt_wildcard_ue_id(uri.ue_id) || uri.ue_id == 0)
-}
-
 fn is_local_only_publish(message: &UMessage) -> bool {
     message.attributes.sink.is_none()
-}
-
-fn normalize_uri_for_vsomeip(uri: &UUri) -> UUri {
-    UUri::try_from_parts(
-        "",
-        uri.ue_id,
-        uri.ue_version_major as u8,
-        uri.resource_id as u16,
-    )
-    .unwrap_or_else(|_| uri.clone())
 }
 
 impl PacomRouter {
@@ -91,6 +70,7 @@ impl PacomRouter {
         mqtt: Option<Arc<Mqtt5Transport>>,
     ) -> Self {
         Self {
+            topology: VsomeipTopologyResolver::new(authority.clone()),
             authority,
             vsomeip,
             mqtt,
@@ -173,73 +153,6 @@ impl PacomRouter {
                 .unwrap_or_else(|| "<none>".to_string())
         ));
         decision
-    }
-
-    fn normalized_local_source_filter(
-        &self,
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-    ) -> UUri {
-        let Some(sink) = sink_filter else {
-            return source_filter.clone();
-        };
-
-        // When source is a wildcard and sink targets a local endpoint, force a
-        // deterministic local source filter to avoid wildcard-derived SOME/IP
-        // offers like instance/version=255 that can conflict with the real offer.
-        if is_wildcard_source_filter(source_filter) && !self.is_cloud_bound(sink) {
-            let resource = if is_wildcard_resource_id(source_filter.resource_id) {
-                sink.resource_id as u16
-            } else {
-                source_filter.resource_id as u16
-            };
-
-            if let Ok(uri) =
-                UUri::try_from_parts("", sink.ue_id, sink.ue_version_major as u8, resource)
-            {
-                dbg_log(format!(
-                    "normalized_local_source_filter: source={} sink={} normalized={}",
-                    uri_dbg(source_filter),
-                    uri_dbg(sink),
-                    uri_dbg(&uri)
-                ));
-                return uri;
-            }
-        }
-
-        source_filter.clone()
-    }
-
-    fn should_skip_local_vsomeip_catchall(
-        &self,
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-    ) -> bool {
-        let Some(sink) = sink_filter else {
-            return false;
-        };
-
-        // This pattern is used by higher layers as a generic "catch-all" listener,
-        // but on SOME/IP it may translate into wildcard service offers that conflict
-        // with concrete service registrations (observed as ...255... conflicts).
-        is_wildcard_source_filter(source_filter)
-            && !self.is_cloud_bound(sink)
-            && is_wildcard_resource_id(sink.resource_id)
-    }
-
-    fn should_skip_local_vsomeip_candidate(
-        &self,
-        candidate: &UUri,
-        sink_filter: Option<&UUri>,
-    ) -> bool {
-        let Some(sink) = sink_filter else {
-            return false;
-        };
-
-        !self.is_cloud_bound(sink)
-            && (is_mqtt_wildcard_ue_id(candidate.ue_id)
-                || is_wildcard_major_version(candidate.ue_version_major)
-                || is_wildcard_resource_id(candidate.resource_id))
     }
 }
 
@@ -633,7 +546,10 @@ impl UTransport for PacomRouter {
                         }
                     }
                 }
-                if self.should_skip_local_vsomeip_catchall(source_filter, sink_filter) {
+                let is_cloud_bound_sink = sink_filter.map(|s| self.is_cloud_bound(s)).unwrap_or(false);
+                let candidates = self.topology.expand_listener_candidates(source_filter, sink_filter, is_cloud_bound_sink);
+
+                if candidates.is_empty() {
                     dbg_log(format!(
                         "register_listener(): skipping local vSomeIP catch-all source={} sink={}",
                         uri_dbg(source_filter),
@@ -643,44 +559,6 @@ impl UTransport for PacomRouter {
                     ));
                     success = true;
                 } else {
-                    let normalized_source =
-                        self.normalized_local_source_filter(source_filter, sink_filter);
-                    let entity_id = normalized_source.ue_id;
-                    let version_major = normalized_source.ue_version_major as u8;
-                    let resource_id = normalized_source.resource_id;
-
-                    let filter_local = UUri::try_from_parts(
-                        &self.authority,
-                        entity_id,
-                        version_major,
-                        resource_id as u16,
-                    )
-                    .unwrap_or_else(|_| normalized_source.clone());
-                    let filter_empty =
-                        UUri::try_from_parts("", entity_id, version_major, resource_id as u16)
-                            .unwrap_or_else(|_| normalized_source.clone());
-
-                    // vSomeIP messages do not carry authorities. For remote authorities, prefer empty/local filters first.
-                    let source_auth = normalized_source.authority_name();
-                    let mut candidates: Vec<UUri> = if !source_auth.is_empty()
-                        && source_auth != "*"
-                        && source_auth != self.authority
-                    {
-                        vec![
-                            filter_empty.clone(),
-                            filter_local.clone(),
-                            normalized_source.clone(),
-                        ]
-                    } else {
-                        vec![
-                            normalized_source.clone(),
-                            filter_local.clone(),
-                            filter_empty.clone(),
-                        ]
-                    };
-
-                    // Deduplicate candidate filters by their URI representation.
-                    candidates.dedup_by(|a, b| a.to_uri(false) == b.to_uri(false));
                     let candidate_list = candidates
                         .iter()
                         .map(uri_dbg)
@@ -692,18 +570,6 @@ impl UTransport for PacomRouter {
                     ));
 
                     for (idx, candidate) in candidates.into_iter().enumerate() {
-                        if self.should_skip_local_vsomeip_candidate(&candidate, sink_filter) {
-                            dbg_log(format!(
-                                "register_listener(): skipping wildcard local vSomeIP candidate candidate_index={} filter={} sink={}",
-                                idx,
-                                uri_dbg(&candidate),
-                                sink_filter
-                                    .map(uri_dbg)
-                                    .unwrap_or_else(|| "<none>".to_string())
-                            ));
-                            continue;
-                        }
-
                         match v
                             .register_listener(&candidate, sink_filter, listener.clone())
                             .await
@@ -834,7 +700,10 @@ impl UTransport for PacomRouter {
                         }
                     }
                 }
-                if self.should_skip_local_vsomeip_catchall(source_filter, sink_filter) {
+                let is_cloud_bound_sink = sink_filter.map(|s| self.is_cloud_bound(s)).unwrap_or(false);
+                let candidates = self.topology.expand_listener_candidates(source_filter, sink_filter, is_cloud_bound_sink);
+
+                if candidates.is_empty() {
                     dbg_log(format!(
                         "unregister_listener(): skipping local vSomeIP catch-all source={} sink={}",
                         uri_dbg(source_filter),
@@ -844,41 +713,6 @@ impl UTransport for PacomRouter {
                     ));
                     success = true;
                 } else {
-                    let normalized_source =
-                        self.normalized_local_source_filter(source_filter, sink_filter);
-                    let entity_id = normalized_source.ue_id;
-                    let version_major = normalized_source.ue_version_major as u8;
-                    let resource_id = normalized_source.resource_id;
-
-                    let filter_local = UUri::try_from_parts(
-                        &self.authority,
-                        entity_id,
-                        version_major,
-                        resource_id as u16,
-                    )
-                    .unwrap_or_else(|_| normalized_source.clone());
-                    let filter_empty =
-                        UUri::try_from_parts("", entity_id, version_major, resource_id as u16)
-                            .unwrap_or_else(|_| normalized_source.clone());
-
-                    let source_auth = normalized_source.authority_name();
-                    let mut candidates: Vec<UUri> = if !source_auth.is_empty()
-                        && source_auth != "*"
-                        && source_auth != self.authority
-                    {
-                        vec![
-                            filter_empty.clone(),
-                            filter_local.clone(),
-                            normalized_source.clone(),
-                        ]
-                    } else {
-                        vec![
-                            normalized_source.clone(),
-                            filter_local.clone(),
-                            filter_empty.clone(),
-                        ]
-                    };
-                    candidates.dedup_by(|a, b| a.to_uri(false) == b.to_uri(false));
                     let candidate_list = candidates
                         .iter()
                         .map(uri_dbg)
@@ -890,18 +724,6 @@ impl UTransport for PacomRouter {
                     ));
 
                     for (idx, candidate) in candidates.into_iter().enumerate() {
-                        if self.should_skip_local_vsomeip_candidate(&candidate, sink_filter) {
-                            dbg_log(format!(
-                                "unregister_listener(): skipping wildcard local vSomeIP candidate candidate_index={} filter={} sink={}",
-                                idx,
-                                uri_dbg(&candidate),
-                                sink_filter
-                                    .map(uri_dbg)
-                                    .unwrap_or_else(|| "<none>".to_string())
-                            ));
-                            continue;
-                        }
-
                         match v
                             .unregister_listener(&candidate, sink_filter, listener.clone())
                             .await
@@ -909,14 +731,15 @@ impl UTransport for PacomRouter {
                             Ok(_) => {
                                 success = true;
                                 dbg_log(format!(
-                                    "unregister_listener(): vSomeIP unregister succeeded candidate_index={} filter={} sink={}",
+                                    "unregister_listener(): vSomeIP listener unregistration succeeded candidate_index={} filter={} sink={}",
                                     idx,
                                     uri_dbg(&candidate),
                                     sink_filter
                                         .map(uri_dbg)
                                         .unwrap_or_else(|| "<none>".to_string())
                                 ));
-                                break;
+                                // Depending on transport behavior, we may want to unregister ALL variants
+                                // instead of breaking on first success. Keeping loop going.
                             }
                             Err(e) => {
                                 dbg_log(format!(
@@ -932,6 +755,12 @@ impl UTransport for PacomRouter {
                                 last_err = Some(e);
                             }
                         }
+                    }
+
+                    if !success {
+                        dbg_log(
+                            "unregister_listener(): vSomeIP listener unregistration failed on all filter variants",
+                        );
                     }
                 }
             }
