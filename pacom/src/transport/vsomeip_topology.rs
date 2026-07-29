@@ -126,7 +126,7 @@ impl VsomeipTopologyResolver {
                 .unwrap_or_else(|_| normalized_source.clone());
 
         let source_auth = normalized_source.authority_name();
-        let mut candidates: Vec<UUri> = if !source_auth.is_empty()
+        let candidates: Vec<UUri> = if !source_auth.is_empty()
             && source_auth != "*"
             && source_auth != self.authority
         {
@@ -143,9 +143,18 @@ impl VsomeipTopologyResolver {
             ]
         };
 
-        candidates.dedup_by(|a, b| a.to_uri(false) == b.to_uri(false));
+        use std::collections::HashSet;
+        
+        let mut unique_candidates = HashSet::new();
+        let mut final_candidates = Vec::new();
+        
+        for candidate in candidates {
+            if unique_candidates.insert(candidate.to_uri(false)) {
+                final_candidates.push(candidate);
+            }
+        }
 
-        candidates
+        final_candidates
             .into_iter()
             .filter(|candidate| {
                 !self.should_skip_local_vsomeip_candidate(candidate, sink_filter, is_cloud_bound_sink)

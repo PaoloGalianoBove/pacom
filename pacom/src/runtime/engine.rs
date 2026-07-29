@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use up_rust::communication::{
     CallOptions, InMemoryRpcClient, InMemoryRpcServer, RequestHandler, RpcClient, RpcServer,
@@ -74,6 +76,28 @@ fn wildcard_local_subscribe_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn is_cloud_topic(name: &str) -> bool {
+    name.trim().starts_with("/cloud/")
+}
+
+fn cloud_authority_name() -> String {
+    std::env::var("PACOM_CLOUD_AUTHORITY").unwrap_or_else(|_| "cloud.bridge".to_string())
+}
+
+fn cloud_wildcard_source_uri(resource_id: u16) -> Result<UUri, PacomError> {
+    UUri::try_from_parts("*", 0xFFFF, 1, resource_id)
+        .map_err(|e| PacomError::Config(format!("Invalid cloud source URI: {e:?}")))
+}
+
+fn cloud_sink_marker_uri(authority: &str) -> Result<UUri, PacomError> {
+    UUri::try_from_parts(authority, 0, 0, 0)
+        .map_err(|e| PacomError::Config(format!("Invalid cloud sink URI: {e:?}")))
+}
+
+fn default_protocol_version() -> u16 {
+    1
+}
+
 #[derive(Clone, Debug)]
 struct ProviderInfo {
     ue_id: u16,
@@ -100,12 +124,15 @@ struct DiscoveryEvent {
     provider_ue_id: u16,
     major_version: u8,
     provider_authority: String,
+    #[serde(default = "default_protocol_version")]
+    protocol_version: u16,
 }
 
 /// A pending subscription waiting for the publisher to announce itself via Discovery.
 struct PendingSubscription {
     listener: Arc<dyn UListener>,
     resource_id: u16,
+    source_authority: Option<String>,
 }
 
 struct DiscoveryListener {
@@ -222,7 +249,16 @@ impl UListener for DiscoveryListener {
                                 event.name,
                                 subs.len()
                             ));
+                            let mut still_pending: Vec<PendingSubscription> = Vec::new();
+
                             for sub in subs {
+                                if let Some(ref wanted_authority) = sub.source_authority {
+                                    if wanted_authority != &effective_authority {
+                                        still_pending.push(sub);
+                                        continue;
+                                    }
+                                }
+
                                 if let Ok(uri) = UUri::try_from_parts(
                                     &effective_authority,
                                     provider.ue_id as u32,
@@ -267,6 +303,14 @@ impl UListener for DiscoveryListener {
                                         event.major_version,
                                         sub.resource_id
                                     ));
+                                }
+                            }
+
+                            if !still_pending.is_empty() {
+                                if let Ok(mut map) = self.pending_subs.lock() {
+                                    map.entry(event.name.clone())
+                                        .or_default()
+                                        .extend(still_pending);
                                 }
                             }
                         } else {
@@ -326,8 +370,11 @@ pub struct RuntimeEngine {
     discovery_cache: Arc<RwLock<DiscoveryCache>>,
     provided_capabilities: Arc<RwLock<ProvidedCapabilities>>,
     manifest: ManifestConfig,
+    local_ue_id: u16,
     /// Pending subscriptions that will be activated as soon as the publisher announces itself.
     pending_subscriptions: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>>,
+    shutdown_tx: watch::Sender<bool>,
+    discovery_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl RuntimeEngine {
@@ -411,7 +458,13 @@ impl RuntimeEngine {
         let discovery_cache = Arc::new(RwLock::new(DiscoveryCache::default()));
         let provided_capabilities = Arc::new(RwLock::new(ProvidedCapabilities {
             rpc_services: manifest.rpc.provide.clone(),
-            published_topics: manifest.topics.publish.clone(),
+            published_topics: manifest
+                .topics
+                .publish
+                .iter()
+                .filter(|topic| !is_cloud_topic(topic))
+                .cloned()
+                .collect(),
         }));
 
         let pending_subscriptions: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>> =
@@ -431,9 +484,12 @@ impl RuntimeEngine {
         });
 
         if needs_vsomeip_discovery {
-            dbg_log("Registering discovery listeners on 16 channels");
+            dbg_log(format!(
+                "Registering discovery listeners on {} channels",
+                discovery_channel_count()
+            ));
             // Subscribe to all 16 discovery channels to hear from any peer.
-            for i in 0..16 {
+            for i in 0..discovery_channel_count() {
                 let discovery_uri = UUri::try_from_parts(
                     "*",
                     (DISCOVERY_UE_ID + i) as u32,
@@ -452,8 +508,19 @@ impl RuntimeEngine {
             }
         }
 
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let discovery_task = Arc::new(Mutex::new(None));
+
         if has_vsomeip {
-            spawn_discovery_reannounce_task(router.clone(), provided_capabilities.clone());
+            let handle = spawn_discovery_reannounce_task(
+                router.clone(),
+                provided_capabilities.clone(),
+                ue_id,
+                shutdown_rx,
+            );
+            if let Ok(mut guard) = discovery_task.lock() {
+                *guard = Some(handle);
+            }
         } else {
             dbg_log("Skipping discovery reannounce task because vSomeIP transport is disabled");
         }
@@ -465,13 +532,29 @@ impl RuntimeEngine {
             discovery_cache,
             provided_capabilities,
             manifest,
+            local_ue_id: ue_id,
             pending_subscriptions,
+            shutdown_tx,
+            discovery_task,
         })
     }
 
+    pub async fn shutdown(&self) -> Result<(), PacomError> {
+        let _ = self.shutdown_tx.send(true);
+        let handle = if let Ok(mut guard) = self.discovery_task.lock() {
+            guard.take()
+        } else {
+            None
+        };
+
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        Ok(())
+    }
+
     async fn announce_discovery(&self, kind: &str, name: &str) -> Result<(), PacomError> {
-        let local_ue_id = resolve_ue_id();
-        self.announce_discovery_with_provider(kind, name, local_ue_id)
+        self.announce_discovery_with_provider(kind, name, self.local_ue_id)
             .await
     }
 
@@ -482,8 +565,7 @@ impl RuntimeEngine {
         provider_ue_id: u16,
     ) -> Result<(), PacomError> {
         let authority = self.router.get_authority();
-        let local_ue_id = resolve_ue_id();
-        let channel = (local_ue_id % 16) as u16;
+        let channel = (self.local_ue_id % discovery_channel_count()) as u16;
 
         let source = UUri::try_from_parts(
             &authority,
@@ -499,6 +581,7 @@ impl RuntimeEngine {
             provider_ue_id,
             major_version: 1, // Standard major version
             provider_authority: authority,
+            protocol_version: default_protocol_version(),
         };
 
         dbg_log(format!(
@@ -527,40 +610,51 @@ impl RuntimeEngine {
             let mut caps = self.provided_capabilities.write().map_err(|_| {
                 PacomError::Config("Failed to update provided capabilities".to_string())
             })?;
-            caps.published_topics.insert(topic_name.to_string());
+            if !is_cloud_topic(topic_name) {
+                caps.published_topics.insert(topic_name.to_string());
+            }
         }
 
-        let resource_id = self.manifest.resource_id_for(topic_name);
+        if is_cloud_topic(topic_name) {
+            let cloud_authority = cloud_authority_name();
+            dbg_log(format!(
+                "publish topic='{}' routed as cloud-bound authority='{}'",
+                topic_name, cloud_authority
+            ));
+            self.publish_to_authority(topic_name, &cloud_authority, payload)
+                .await
+        } else {
+            let resource_id = self.manifest.resource_id_for(topic_name);
 
-        let local_authority = self.router.get_authority();
-        let local_ue_id = resolve_ue_id();
-        let topic_publish_ue_id = Self::derive_topic_publish_ue_id(local_ue_id);
+            let local_authority = self.router.get_authority();
+            let local_ue_id = self.local_ue_id;
+            let topic_publish_ue_id = Self::derive_topic_publish_ue_id(local_ue_id);
 
-        let uri =
-            UUri::try_from_parts(&local_authority, topic_publish_ue_id as u32, 1, resource_id)
+            let uri = UUri::try_from_parts(&local_authority, topic_publish_ue_id as u32, 1, resource_id)
                 .map_err(|e| PacomError::Config(format!("Invalid topic URI: {e:?}")))?;
 
-        let msg = UMessageBuilder::publish(uri)
-            .build_with_payload(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW)
-            .map_err(|e| PacomError::Config(format!("Failed to build message: {e:?}")))?;
+            let msg = UMessageBuilder::publish(uri)
+                .build_with_payload(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW)
+                .map_err(|e| PacomError::Config(format!("Failed to build message: {e:?}")))?;
 
-        dbg_log(format!(
-            "publish topic='{}' uri='{}' payload_len={} topic_publish_ue=0x{:04X} app_ue=0x{:04X}",
-            topic_name,
-            msg.attributes
-                .source
-                .as_ref()
-                .map(|u| u.to_uri(false))
-                .unwrap_or_else(|| "<none>".to_string()),
-            msg.payload.as_ref().map(|p| p.len()).unwrap_or(0),
-            topic_publish_ue_id,
-            local_ue_id
-        ));
+            dbg_log(format!(
+                "publish topic='{}' uri='{}' payload_len={} topic_publish_ue=0x{:04X} app_ue=0x{:04X}",
+                topic_name,
+                msg.attributes
+                    .source
+                    .as_ref()
+                    .map(|u| u.to_uri(false))
+                    .unwrap_or_else(|| "<none>".to_string()),
+                msg.payload.as_ref().map(|p| p.len()).unwrap_or(0),
+                topic_publish_ue_id,
+                local_ue_id
+            ));
 
-        self.router.send(msg).await?;
-        self.announce_discovery_with_provider("topic_publish", topic_name, topic_publish_ue_id)
-            .await?;
-        Ok(())
+            self.announce_discovery_with_provider("topic_publish", topic_name, topic_publish_ue_id)
+                .await?;
+            self.router.send(msg).await?;
+            Ok(())
+        }
     }
 
     /// Publishes a logical event topic targeting a specific authority.
@@ -582,7 +676,7 @@ impl RuntimeEngine {
 
         let resource_id = self.manifest.resource_id_for(topic_name);
         let local_authority = self.router.get_authority();
-        let local_ue_id = resolve_ue_id();
+        let local_ue_id = self.local_ue_id;
 
         // The source is US (local ECU)
         let source_uri = UUri::try_from_parts(&local_authority, local_ue_id as u32, 1, resource_id)
@@ -630,6 +724,24 @@ impl RuntimeEngine {
             expected_resource_id: resource_id,
             callback: Box::new(callback),
         });
+
+        if is_cloud_topic(topic_name) {
+            let cloud_authority = cloud_authority_name();
+            let source_filter = cloud_wildcard_source_uri(resource_id)?;
+            let sink_filter = cloud_sink_marker_uri(&cloud_authority)?;
+
+            dbg_log(format!(
+                "subscribe topic='{}' resolved as cloud listener source='{}' sink='{}'",
+                topic_name,
+                source_filter.to_uri(false),
+                sink_filter.to_uri(false)
+            ));
+
+            self.router
+                .register_listener(&source_filter, Some(&sink_filter), listener)
+                .await?;
+            return Ok(());
+        }
 
         dbg_log(format!(
             "subscribe topic='{}' resource_id=0x{:04X} wildcard_fallback_enabled={}",
@@ -708,6 +820,7 @@ impl RuntimeEngine {
                     .push(PendingSubscription {
                         listener,
                         resource_id,
+                        source_authority: None,
                     });
                 dbg_log(format!("subscribe pending topic='{}'", topic_name));
                 let total_pending = map.values().map(|v| v.len()).sum::<usize>();
@@ -803,6 +916,7 @@ impl RuntimeEngine {
                         .push(PendingSubscription {
                             listener,
                             resource_id,
+                            source_authority: Some(authority.to_string()),
                         });
                     let total_pending = map.values().map(|v| v.len()).sum::<usize>();
                     dbg_log(format!(
@@ -841,13 +955,13 @@ impl RuntimeEngine {
         .map_err(|e| PacomError::Config(format!("Invalid method URI: {e:?}")))?;
 
         let payload_obj = UPayload::new(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW);
-        let call_options = CallOptions::for_rpc_request(5000, None, None, None);
+        let call_options = CallOptions::for_rpc_request(rpc_timeout_ms(), None, None, None);
 
         let response = self
             .rpc_client
             .invoke_method(method_uri, call_options, Some(payload_obj))
             .await
-            .map_err(|e| PacomError::Config(format!("RPC invocation failed: {e:?}")))?;
+            .map_err(|e| PacomError::RpcError(format!("RPC invocation failed: {e:?}")))?;
 
         match response {
             Some(p) => Ok(p.payload().to_vec()),
@@ -961,6 +1075,21 @@ fn discovery_wait_timeout() -> Duration {
         .unwrap_or(Duration::from_millis(180_000))
 }
 
+fn rpc_timeout_ms() -> u32 {
+    std::env::var("PACOM_RPC_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(5_000)
+}
+
+fn discovery_channel_count() -> u16 {
+    std::env::var("PACOM_DISCOVERY_CHANNELS")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|v| *v > 0 && *v <= 64)
+        .unwrap_or(16)
+}
+
 fn discovery_poll_interval() -> Duration {
     std::env::var("PACOM_DISCOVERY_POLL_MS")
         .ok()
@@ -980,7 +1109,9 @@ fn discovery_reannounce_interval() -> Duration {
 fn spawn_discovery_reannounce_task(
     router: Arc<PacomRouter>,
     provided_capabilities: Arc<RwLock<ProvidedCapabilities>>,
-) {
+    local_ue_id: u16,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let interval = discovery_reannounce_interval();
         dbg_log(format!(
@@ -988,7 +1119,15 @@ fn spawn_discovery_reannounce_task(
             interval.as_secs()
         ));
         loop {
-            sleep(interval).await;
+            tokio::select! {
+                _ = sleep(interval) => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_ok() && *shutdown_rx.borrow() {
+                        dbg_log("discovery reannounce task stopped by shutdown signal");
+                        break;
+                    }
+                }
+            }
 
             let (services, topics) = match provided_capabilities.read() {
                 Ok(caps) => (
@@ -998,9 +1137,8 @@ fn spawn_discovery_reannounce_task(
                 Err(_) => continue,
             };
 
-            let local_ue_id = resolve_ue_id();
             let topic_publish_ue_id = RuntimeEngine::derive_topic_publish_ue_id(local_ue_id);
-            let channel = (local_ue_id % 16) as u16;
+            let channel = (local_ue_id % discovery_channel_count()) as u16;
             dbg_log(format!(
                 "discovery reannounce tick: rpc_count={} topic_count={} channel={}",
                 services.len(),
@@ -1022,6 +1160,7 @@ fn spawn_discovery_reannounce_task(
                         provider_ue_id: local_ue_id,
                         major_version: 1,
                         provider_authority: authority,
+                        protocol_version: default_protocol_version(),
                     };
                     let _ = send_discovery_event(&router, source, event).await;
                 }
@@ -1041,12 +1180,13 @@ fn spawn_discovery_reannounce_task(
                         provider_ue_id: topic_publish_ue_id,
                         major_version: 1,
                         provider_authority: authority,
+                        protocol_version: default_protocol_version(),
                     };
                     let _ = send_discovery_event(&router, source, event).await;
                 }
             }
         }
-    });
+    })
 }
 
 async fn send_discovery_event(
@@ -1088,7 +1228,19 @@ async fn send_discovery_event(
 
 /// Resolve the node/ECU authority name from environment.
 fn resolve_authority() -> String {
-    std::env::var("UP_AUTHORITY").unwrap_or_else(|_| "local_ecu".to_string())
+    if let Ok(authority) = std::env::var("UP_AUTHORITY") {
+        if !authority.trim().is_empty() {
+            return authority;
+        }
+    }
+
+    if let Ok(hostname) = std::env::var("HOSTNAME") {
+        if !hostname.trim().is_empty() {
+            return hostname;
+        }
+    }
+
+    "local_ecu".to_string()
 }
 
 /// Resolve the application UE identifier from environment,

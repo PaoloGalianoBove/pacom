@@ -46,6 +46,10 @@ pub enum PacomError {
     /// An RPC invocation returned an empty response payload.
     #[error("RPC returned empty response")]
     EmptyResponse,
+
+    /// An RPC invocation failed at runtime.
+    #[error("RPC error: {0}")]
+    RpcError(String),
 }
 
 impl From<PacomError> for UStatus {
@@ -57,6 +61,7 @@ impl From<PacomError> for UStatus {
             PacomError::Config(_) => UStatus::fail_with_code(UCode::INTERNAL, error.to_string()),
             PacomError::IdCollision { .. } => UStatus::fail_with_code(UCode::ALREADY_EXISTS, error.to_string()),
             PacomError::EmptyResponse => UStatus::fail_with_code(UCode::NOT_FOUND, error.to_string()),
+            PacomError::RpcError(_) => UStatus::fail_with_code(UCode::UNAVAILABLE, error.to_string()),
         }
     }
 }

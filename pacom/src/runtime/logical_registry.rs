@@ -36,12 +36,21 @@ pub struct ManifestConfig {
 
 impl ManifestConfig {
     /// Loads a manifest from the given filesystem path.
-    /// Returns a default (empty) manifest on any I/O or parse failure.
+    /// Returns a default (empty) manifest on any I/O or parse failure,
+    /// and logs the reason to ease diagnostics.
     pub fn load(path: &str) -> Self {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = serde_json::from_str::<ManifestConfig>(&content) {
-                return config;
-            }
+        match std::fs::read_to_string(path) {
+            Ok(content) => match serde_json::from_str::<ManifestConfig>(&content) {
+                Ok(config) => return config,
+                Err(e) => eprintln!(
+                    "[PACOM][Manifest] Invalid JSON in '{}': {}. Falling back to empty manifest.",
+                    path, e
+                ),
+            },
+            Err(e) => eprintln!(
+                "[PACOM][Manifest] Failed to read '{}': {}. Falling back to empty manifest.",
+                path, e
+            ),
         }
         ManifestConfig::default()
     }

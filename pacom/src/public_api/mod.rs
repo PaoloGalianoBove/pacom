@@ -22,6 +22,8 @@ impl PacomRuntime {
 
     /// Publishes a fire-and-forget event on the specified logical topic.
     ///
+    /// This uses local publish semantics (intra-domain fan-out).
+    /// For cross-domain delivery to a specific authority, use `publish_event_to`.
     /// The topic must be declared in the `topics.publish` section of the application manifest.
     pub async fn publish(&self, topic_name: &str, payload: Vec<u8>) -> Result<(), PacomError> {
         self.inner.publish(topic_name, payload).await
@@ -125,6 +127,11 @@ impl PacomRuntime {
         self.inner
             .subscribe_from_authority(logical_topic, source_authority, callback)
             .await
+    }
+
+    /// Gracefully stops PACOM background tasks.
+    pub async fn shutdown(&self) -> Result<(), PacomError> {
+        self.inner.shutdown().await
     }
 }
 

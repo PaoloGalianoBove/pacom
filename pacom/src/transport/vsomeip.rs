@@ -10,7 +10,7 @@ use up_rust::{UCode, UStatus, UUri};
 use up_transport_vsomeip::UPTransportVsomeip;
 
 const IPC_DIR: &str = "/tmp/vsomeip-ipc";
-const ROUTER_SOCKET: &str = "/tmp/vsomeip-0";
+const ROUTER_SOCKET: &str = "/tmp/vsomeip-ipc/vsomeip-0";
 const LOCK_FILE: &str = "/tmp/vsomeip-ipc/router.lock";
 const ROUTER_NAME: &str = "vsomeip-router";
 const DEFAULT_LOCK_STALE_MS: u64 = 8_000;
@@ -20,8 +20,16 @@ const DEFAULT_RPC_RELIABLE_PORT: u16 = 30509;
 const DEFAULT_DISCOVERY_UNRELIABLE_PORT: u16 = 30510;
 const DEFAULT_TOPIC_PUBLISH_UNRELIABLE_PORT: u16 = 30511;
 
+fn discovery_channel_count() -> u16 {
+    std::env::var("PACOM_DISCOVERY_CHANNELS")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|v| *v > 0 && *v <= 64)
+        .unwrap_or(16)
+}
+
 fn discovery_service_id_for(ue_id: u16) -> u16 {
-    0x0F00u16 + (ue_id % 16)
+    0x0F00u16 + (ue_id % discovery_channel_count())
 }
 
 fn topic_publish_service_id_for(ue_id: u16) -> u16 {
@@ -58,6 +66,34 @@ fn env_string_non_empty(var: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn env_string_non_empty_compat(primary: &str, legacy: &str) -> Option<String> {
+    env_string_non_empty(primary).or_else(|| env_string_non_empty(legacy))
+}
+
+fn cleanup_temp_vsomeip_configs() {
+    if !env_flag_enabled("PACOM_VSOMEIP_CLEAN_TEMP_CONFIGS", true) {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir("/tmp") else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+
+        let is_generated = (name.starts_with("vsomeip-") && name.ends_with(".json"))
+            || (name.starts_with("pacom-vsomeip.effective.") && name.ends_with(".json"));
+
+        if is_generated {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String, UStatus> {
@@ -115,8 +151,10 @@ fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String
     })?;
 
     if self_routing_enabled {
-        let app_name = std::env::var("APP_NAME").unwrap_or_else(|_| format!("app-0x{:04x}", ue_id));
-        let app_id_hex = std::env::var("APP_ID_HEX").unwrap_or_else(|_| normalize_hex_u16(ue_id));
+        let app_name = env_string_non_empty_compat("PACOM_APP_NAME", "APP_NAME")
+            .unwrap_or_else(|| format!("app-0x{:04x}", ue_id));
+        let app_id_hex = env_string_non_empty_compat("PACOM_APP_ID_HEX", "APP_ID_HEX")
+            .unwrap_or_else(|| normalize_hex_u16(ue_id));
 
         root.insert(
             "applications".to_string(),
@@ -341,6 +379,10 @@ pub async fn setup_vsomeip_transport(
     ue_id: u16,
     authority: &str,
 ) -> Result<Arc<UPTransportVsomeip>, UStatus> {
+    unsafe {
+        std::env::set_var("VSOMEIP_BASE_PATH", IPC_DIR);
+    }
+    
     dbg_log(format!(
         "setup start: ue_id=0x{:04X} authority='{}' role_override={:?} lock_stale_ms={} election_wait_ms={}",
         ue_id,
@@ -349,6 +391,8 @@ pub async fn setup_vsomeip_transport(
         lock_stale_timeout().as_millis(),
         election_wait_timeout().as_millis()
     ));
+
+    cleanup_temp_vsomeip_configs();
 
     // If a configuration path is explicitly provided, use it as-is.
     if let Ok(config_path) = std::env::var("PACOM_VSOMEIP_CONFIG_PATH") {
@@ -574,6 +618,29 @@ pub async fn setup_vsomeip_transport(
 /// Dynamically determine the local network interface IP address to use for unicast.
 /// It uses a UDP routing trick that doesn't send any physical packets on the network.
 fn get_local_ip() -> String {
+    if let Ok(ip) = std::env::var("PACOM_VSOMEIP_UNICAST_IP") {
+        let ip = ip.trim();
+        if !ip.is_empty() {
+            dbg_log(format!("get_local_ip: using PACOM_VSOMEIP_UNICAST_IP={}", ip));
+            return ip.to_string();
+        }
+    }
+
+    for probe in ["8.8.8.8:80", "172.17.0.1:80", "192.168.0.1:80", "10.0.0.1:80"] {
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(probe).is_ok() {
+                if let Ok(local_addr) = socket.local_addr() {
+                    dbg_log(format!(
+                        "get_local_ip: selected local IP {} using probe {}",
+                        local_addr.ip(),
+                        probe
+                    ));
+                    return local_addr.ip().to_string();
+                }
+            }
+        }
+    }
+
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
         dbg_log("get_local_ip: UDP bind to 0.0.0.0:0 succeeded");
         if socket.connect("8.8.8.8:80").is_ok() {
@@ -766,6 +833,7 @@ fn lock_is_stale(path: &str, stale_after: Duration) -> bool {
 }
 
 fn lock_owner_is_dead(path: &str) -> bool {
+    // Linux-specific check: relies on /proc to verify owner process liveness.
     let contents = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return false,

@@ -15,8 +15,8 @@ pub async fn setup_mqtt_transport(
 
     // Configure transport options for OffVehicle mode (telemetry/cloud)
     let options = Mqtt5TransportOptions {
-        max_filters: 100,
-        max_listeners_per_filter: 10,
+        max_filters: 10_000,
+        max_listeners_per_filter: 100,
         mode: TransportMode::OffVehicle,
         mqtt_client_options: client_options,
     };

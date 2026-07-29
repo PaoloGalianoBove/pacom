@@ -2,9 +2,9 @@ use pacom::{MqttConfig, PacomRuntime, RuntimeConfig};
 use std::sync::Arc;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 
+const TOPIC_STATUS: &str = "/status/lights";
 const TOPIC_CLOUD_TELEMETRY: &str = "/cloud/telemetry";
 const TOPIC_CLOUD_COMMAND: &str = "/cloud/command";
-const SWITCH_AUTHORITY: &str = "ecu-switch";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,9 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     );
 
-    // Sottoscrizione alle telemetrie ricevute da ecu-switch
+    // Sottoscrizione alla telemetria cloud del veicolo.
     runtime
-        .subscribe_event_from(TOPIC_CLOUD_TELEMETRY, SWITCH_AUTHORITY, |payload| {
+        .subscribe_event(TOPIC_CLOUD_TELEMETRY, |payload| {
             let status = String::from_utf8_lossy(&payload);
             println!("\n[CLOUD - TELEMETRIA] Stato luci veicolo: {}", status);
             print_menu();
@@ -58,16 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if let Some(cmd_str) = cmd {
-            println!(
-                "[CLOUD] Invio comando '{}' via MQTT a ecu-switch...",
-                cmd_str
-            );
+            println!("[CLOUD] Invio comando '{}' via MQTT...", cmd_str);
             if let Err(e) = runtime
-                .publish_event_to(
-                    TOPIC_CLOUD_COMMAND,
-                    SWITCH_AUTHORITY,
-                    cmd_str.as_bytes().to_vec(),
-                )
+                .publish_event(TOPIC_CLOUD_COMMAND, cmd_str.as_bytes().to_vec())
                 .await
             {
                 eprintln!("[CLOUD - ERRORE MQTT] Invio comando fallito: {}", e);

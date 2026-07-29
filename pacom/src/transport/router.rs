@@ -6,7 +6,8 @@ use up_transport_mqtt5::Mqtt5Transport;
 use up_transport_vsomeip::UPTransportVsomeip;
 
 use crate::transport::vsomeip_topology::{
-    is_wildcard_major_version, is_wildcard_resource_id, normalize_uri_for_vsomeip,
+    is_mqtt_wildcard_ue_id, is_wildcard_major_version, is_wildcard_resource_id,
+    normalize_uri_for_vsomeip,
     VsomeipTopologyResolver,
 };
 
@@ -80,9 +81,8 @@ impl PacomRouter {
     /// Returns true if a message targeting `uri` must be routed via the cross-domain
     /// transport (MQTT) rather than the local intra-vehicle transport (vSomeIP).
     ///
-    /// The rule is general: any destination with an authority different from the local
-    /// node's authority is considered cross-domain. If the local node itself has no
-    /// vSomeIP transport (e.g. a pure cloud gateway), all traffic is cross-domain.
+    /// Cross-domain routing is currently triggered for explicit cross-domain markers,
+    /// MQTT wildcard UE-IDs, or when vSomeIP is unavailable on this node.
     pub fn is_cloud_bound(&self, uri: &UUri) -> bool {
         let target_auth = uri.authority_name();
         // Empty or wildcard authority means local (broadcast on vSomeIP)
@@ -186,10 +186,23 @@ impl UTransport for PacomRouter {
             let mut last_err = None;
 
             if let Some(ref mqtt_tx) = self.mqtt {
-                // Off-Vehicle MQTT routing requires a sink URI. Sink-less Publish is local
-                // fan-out semantics, so we intentionally skip MQTT for this branch.
-                let _ = mqtt_tx;
-                dbg_log("send(): publish->mqtt skipped (sink missing; local publish only)");
+                let mqtt_msg = message.clone();
+                trace!("[Router] Broadcasting Publish to MQTT transport");
+                match mqtt_tx.send(mqtt_msg).await {
+                    Ok(_) => {
+                        success = true;
+                        dbg_log("send(): publish->mqtt result=ok");
+                    }
+                    Err(e) => {
+                        dbg_log(format!(
+                            "send(): publish->mqtt result=err code={:?} message={:?}",
+                            e.code, e.message
+                        ));
+                        if !success {
+                            last_err = Some(e);
+                        }
+                    }
+                }
             }
 
             if let Some(ref v) = self.vsomeip {
@@ -299,9 +312,10 @@ impl UTransport for PacomRouter {
                 }
                 out
             } else {
-                // MQTT not configured: skip cloud-bound send gracefully.
-                info!("[Router] Cloud send skipped: MQTT transport not configured");
-                Ok(())
+                Err(UStatus::fail_with_code(
+                    up_rust::UCode::UNAVAILABLE,
+                    "Cloud-bound message cannot be sent: MQTT transport not configured",
+                ))
             }
         } else {
             if let Some(ref v) = self.vsomeip {
@@ -456,8 +470,8 @@ impl UTransport for PacomRouter {
 
         if is_cloud {
             if let Some(ref mqtt_tx) = self.mqtt {
-                let default_sink =
-                    UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF).unwrap();
+                let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF)
+                    .unwrap();
                 let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
                 let mut retries = 50;
                 let mut attempt = 1;
@@ -641,8 +655,8 @@ impl UTransport for PacomRouter {
 
         if is_cloud {
             if let Some(ref mqtt_tx) = self.mqtt {
-                let default_sink =
-                    UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF).unwrap();
+                let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF)
+                    .unwrap();
                 let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
                 match mqtt_tx
                     .unregister_listener(source_filter, effective_sink, listener.clone())
@@ -816,6 +830,8 @@ impl UTransport for PacomRouter {
                 )),
             }
             out
+        } else if let Some(ref mqtt_tx) = self.mqtt {
+            mqtt_tx.receive(source_filter, sink_filter).await
         } else {
             Err(UStatus::fail_with_code(
                 up_rust::UCode::UNAVAILABLE,
