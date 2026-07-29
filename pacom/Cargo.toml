@@ -11,7 +11,7 @@ categories = ["network-programming", "aerospace-and-automotive"]
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 up-rust = "0.9.0"
-up-transport-vsomeip = { git = "https://github.com/eclipse-uprotocol/up-transport-vsomeip-rust.git", package = "up-transport-vsomeip" }
+up-transport-vsomeip = { git = "https://github.com/PaoloGalianoBove/up-rust-vsomeip-PGB.git", branch = "bugfix-commstatus", package = "up-transport-vsomeip", version = "0.5.0" }
 up-transport-mqtt5 = "0.4.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

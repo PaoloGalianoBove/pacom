@@ -3224,8 +3224,8 @@ dependencies = [
 
 [[package]]
 name = "up-transport-vsomeip"
-version = "0.4.1"
-source = "git+https://github.com/eclipse-uprotocol/up-transport-vsomeip-rust.git#278ab26415559d6cb61f40facd21de822032cc83"
+version = "0.5.0"
+source = "git+https://github.com/PaoloGalianoBove/up-rust-vsomeip-PGB.git?branch=bugfix-commstatus#06748fe6cbb8714a50537c3bcee2be832bde957a"
 dependencies = [
  "async-trait",
  "bimap",
@@ -3355,8 +3355,8 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vsomeip-proc-macro"
-version = "0.4.1"
-source = "git+https://github.com/eclipse-uprotocol/up-transport-vsomeip-rust.git#278ab26415559d6cb61f40facd21de822032cc83"
+version = "0.5.0"
+source = "git+https://github.com/PaoloGalianoBove/up-rust-vsomeip-PGB.git?branch=bugfix-commstatus#06748fe6cbb8714a50537c3bcee2be832bde957a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3366,8 +3366,8 @@ dependencies = [
 
 [[package]]
 name = "vsomeip-sys"
-version = "0.4.1"
-source = "git+https://github.com/eclipse-uprotocol/up-transport-vsomeip-rust.git#278ab26415559d6cb61f40facd21de822032cc83"
+version = "0.5.0"
+source = "git+https://github.com/PaoloGalianoBove/up-rust-vsomeip-PGB.git?branch=bugfix-commstatus#06748fe6cbb8714a50537c3bcee2be832bde957a"
 dependencies = [
  "autocxx",
  "autocxx-build",

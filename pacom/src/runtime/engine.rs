@@ -5,9 +5,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -18,14 +15,13 @@ use up_rust::communication::{
 };
 use up_rust::{
     LocalUriProvider, UAttributes, UListener, UMessage, UMessageBuilder, UPayloadFormat, UStatus,
-    UTransport, UUri, UUID,
+    UTransport, UUri,
 };
 
 use std::sync::Mutex;
 
 const DISCOVERY_UE_ID: u16 = 0x0F00;
 const DISCOVERY_RESOURCE_ID: u16 = 0x8F01;
-static RPC_DIAG_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn verbose_debug_enabled() -> bool {
     std::env::var("PACOM_DEBUG_VERBOSE")
@@ -39,25 +35,6 @@ fn verbose_debug_enabled() -> bool {
 fn dbg_log(msg: impl AsRef<str>) {
     if verbose_debug_enabled() {
         println!("[PACOM-DBG][Runtime] {}", msg.as_ref());
-    }
-}
-
-fn rpc_diag_enabled() -> bool {
-    std::env::var("PACOM_RPC_DIAGNOSTICS")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false)
-}
-
-fn next_rpc_diag_id() -> u64 {
-    RPC_DIAG_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-fn rpc_diag_log(msg: impl AsRef<str>) {
-    if rpc_diag_enabled() {
-        println!("[PACOM-RPC-DIAG] {}", msg.as_ref());
     }
 }
 
@@ -135,80 +112,6 @@ struct DiscoveryListener {
     cache: Arc<RwLock<DiscoveryCache>>,
     router: Arc<PacomRouter>,
     pending_subs: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>>,
-}
-
-#[derive(Clone)]
-struct RpcDedupState {
-    enabled: bool,
-    ttl: Duration,
-    max_entries: usize,
-    cache: Arc<Mutex<RpcDedupCache>>,
-}
-
-impl RpcDedupState {
-    fn new() -> Self {
-        Self {
-            enabled: rpc_dedup_enabled(),
-            ttl: rpc_dedup_ttl(),
-            max_entries: rpc_dedup_max_entries(),
-            cache: Arc::new(Mutex::new(RpcDedupCache::default())),
-        }
-    }
-}
-
-#[derive(Default)]
-struct RpcDedupCache {
-    entries: HashMap<String, RpcDedupEntry>,
-}
-
-struct RpcDedupEntry {
-    response: Vec<u8>,
-    expires_at: Instant,
-}
-
-impl RpcDedupCache {
-    fn get_valid_response(&mut self, key: &str, now: Instant) -> Option<Vec<u8>> {
-        self.purge_expired(now);
-        if let Some(entry) = self.entries.get(key) {
-            return Some(entry.response.clone());
-        }
-        None
-    }
-
-    fn insert_response(
-        &mut self,
-        key: String,
-        response: Vec<u8>,
-        now: Instant,
-        ttl: Duration,
-        max_entries: usize,
-    ) {
-        self.purge_expired(now);
-
-        if self.entries.len() >= max_entries {
-            if let Some(first_key) = self.entries.keys().next().cloned() {
-                self.entries.remove(&first_key);
-            }
-        }
-
-        self.entries.insert(
-            key,
-            RpcDedupEntry {
-                response,
-                expires_at: now + ttl,
-            },
-        );
-    }
-
-    fn purge_expired(&mut self, now: Instant) {
-        self.entries.retain(|_, entry| entry.expires_at > now);
-    }
-}
-
-fn payload_signature(payload: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
-    hasher.finish()
 }
 
 #[async_trait]
@@ -425,7 +328,6 @@ pub struct RuntimeEngine {
     manifest: ManifestConfig,
     /// Pending subscriptions that will be activated as soon as the publisher announces itself.
     pending_subscriptions: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>>,
-    rpc_dedup: Arc<RpcDedupState>,
 }
 
 impl RuntimeEngine {
@@ -514,13 +416,6 @@ impl RuntimeEngine {
 
         let pending_subscriptions: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let rpc_dedup = Arc::new(RpcDedupState::new());
-        dbg_log(format!(
-            "RuntimeEngine::new rpc_dedup enabled={} ttl_ms={} max_entries={}",
-            rpc_dedup.enabled,
-            rpc_dedup.ttl.as_millis(),
-            rpc_dedup.max_entries
-        ));
 
         // Register vSomeIP discovery channels whenever this node has vSomeIP enabled
         // and actually needs to discover remote peers (has subscriptions or consumed RPCs).
@@ -571,7 +466,6 @@ impl RuntimeEngine {
             provided_capabilities,
             manifest,
             pending_subscriptions,
-            rpc_dedup,
         })
     }
 
@@ -946,95 +840,19 @@ impl RuntimeEngine {
         )
         .map_err(|e| PacomError::Config(format!("Invalid method URI: {e:?}")))?;
 
-        let timeout_ms = rpc_timeout_ms();
-        let retry_count = rpc_retry_count();
-        let retry_backoff = rpc_retry_backoff();
-        let rpc_message_id = UUID::build();
-        let rpc_id = next_rpc_diag_id();
-        let start = Instant::now();
-        rpc_diag_log(format!(
-            "client rpc_id={} phase=start service='{}' timeout_ms={} retries={} message_id={} method_uri='{}' payload_len={}",
-            rpc_id,
-            service_name,
-            timeout_ms,
-            retry_count,
-            rpc_message_id.to_hyphenated_string(),
-            method_uri.to_uri(false),
-            payload.len()
-        ));
-        let max_attempts = (retry_count as usize) + 1;
+        let payload_obj = UPayload::new(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW);
+        let call_options = CallOptions::for_rpc_request(5000, None, None, None);
 
-        for attempt in 1..=max_attempts {
-            let payload_obj = UPayload::new(payload.clone(), UPayloadFormat::UPAYLOAD_FORMAT_RAW);
-            let call_options = CallOptions::for_rpc_request(
-                timeout_ms,
-                Some(rpc_message_id.clone()),
-                None,
-                None,
-            );
+        let response = self
+            .rpc_client
+            .invoke_method(method_uri, call_options, Some(payload_obj))
+            .await
+            .map_err(|e| PacomError::Config(format!("RPC invocation failed: {e:?}")))?;
 
-            if attempt > 1 {
-                rpc_diag_log(format!(
-                    "client rpc_id={} phase=retry_start attempt={} max_attempts={} elapsed_ms={}",
-                    rpc_id,
-                    attempt,
-                    max_attempts,
-                    start.elapsed().as_millis()
-                ));
-            }
-
-            let response = self
-                .rpc_client
-                .invoke_method(method_uri.clone(), call_options, Some(payload_obj))
-                .await;
-
-            match response {
-                Ok(Some(p)) => {
-                    let response_bytes = p.payload().to_vec();
-                    rpc_diag_log(format!(
-                        "client rpc_id={} phase=ok attempts={} elapsed_ms={} response_len={}",
-                        rpc_id,
-                        attempt,
-                        start.elapsed().as_millis(),
-                        response_bytes.len()
-                    ));
-                    return Ok(response_bytes);
-                }
-                Ok(None) => {
-                    rpc_diag_log(format!(
-                        "client rpc_id={} phase=empty attempts={} elapsed_ms={}",
-                        rpc_id,
-                        attempt,
-                        start.elapsed().as_millis()
-                    ));
-                    return Err(PacomError::EmptyResponse);
-                }
-                Err(e) => {
-                    let retryable = is_transient_rpc_error(&e);
-                    let has_next_attempt = attempt < max_attempts;
-                    rpc_diag_log(format!(
-                        "client rpc_id={} phase=error attempt={} max_attempts={} elapsed_ms={} retryable={} err={:?}",
-                        rpc_id,
-                        attempt,
-                        max_attempts,
-                        start.elapsed().as_millis(),
-                        retryable,
-                        e
-                    ));
-
-                    if retryable && has_next_attempt {
-                        sleep(retry_backoff).await;
-                        continue;
-                    }
-
-                    return Err(PacomError::Config(format!("RPC invocation failed: {e:?}")));
-                }
-            }
+        match response {
+            Some(p) => Ok(p.payload().to_vec()),
+            None => Err(PacomError::EmptyResponse),
         }
-
-        Err(PacomError::Config(
-            "RPC invocation failed: exhausted retry attempts".to_string(),
-        ))
     }
 
     /// Registers an asynchronous handler for an RPC method served by this process.
@@ -1055,14 +873,10 @@ impl RuntimeEngine {
         }
 
         let method_id = self.manifest.method_id_for(service_name);
-        let endpoint_source = self.router.get_source_uri();
 
-        let wrapper = Arc::new(ClosureHandler {
-            handler,
-            rpc_dedup: self.rpc_dedup.clone(),
-        });
+        let wrapper = Arc::new(ClosureHandler { handler });
         self.rpc_server
-            .register_endpoint(Some(&endpoint_source), method_id, wrapper)
+            .register_endpoint(None, method_id, wrapper)
             .await
             .map_err(|e| PacomError::Config(format!("Failed to register RPC: {e:?}")))?;
 
@@ -1161,71 +975,6 @@ fn discovery_reannounce_interval() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(5))
-}
-
-fn rpc_timeout_ms() -> u32 {
-    std::env::var("PACOM_RPC_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(5000)
-}
-
-fn rpc_retry_count() -> u8 {
-    std::env::var("PACOM_RPC_RETRY_COUNT")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(1)
-}
-
-fn rpc_retry_backoff() -> Duration {
-    std::env::var("PACOM_RPC_RETRY_BACKOFF_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_millis(120))
-}
-
-fn rpc_dedup_enabled() -> bool {
-    std::env::var("PACOM_RPC_DEDUP_ENABLED")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(true)
-}
-
-fn rpc_dedup_ttl() -> Duration {
-    std::env::var("PACOM_RPC_DEDUP_TTL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_millis(500))
-}
-
-fn rpc_dedup_max_entries() -> usize {
-    std::env::var("PACOM_RPC_DEDUP_MAX_ENTRIES")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(2048)
-}
-
-fn is_transient_rpc_error(err: &ServiceInvocationError) -> bool {
-    match err {
-        ServiceInvocationError::DeadlineExceeded => true,
-        ServiceInvocationError::Unavailable(_) => true,
-        ServiceInvocationError::Internal(_) => true,
-        ServiceInvocationError::RpcError(status) => {
-            matches!(
-                status.code.enum_value_or_default(),
-                up_rust::UCode::UNAVAILABLE
-                    | up_rust::UCode::DEADLINE_EXCEEDED
-                    | up_rust::UCode::INTERNAL
-                    | up_rust::UCode::UNKNOWN
-            )
-        }
-        _ => false,
-    }
 }
 
 fn spawn_discovery_reannounce_task(
@@ -1436,7 +1185,6 @@ impl UListener for ClosureListener {
 /// Internal adapter from uProtocol request handlers to byte closures.
 struct ClosureHandler<F> {
     handler: F,
-    rpc_dedup: Arc<RpcDedupState>,
 }
 
 #[async_trait]
@@ -1447,128 +1195,15 @@ where
 {
     async fn handle_request(
         &self,
-        method_id: u16,
-        attributes: &UAttributes,
+        _method_id: u16,
+        _attributes: &UAttributes,
         request_payload: Option<UPayload>,
     ) -> Result<Option<UPayload>, ServiceInvocationError> {
-        let rpc_id = next_rpc_diag_id();
-        let start = Instant::now();
         let req_bytes = request_payload
             .map(|p| p.payload().to_vec())
             .unwrap_or_default();
 
-        let source = attributes
-            .source
-            .as_ref()
-            .map(|u| u.to_uri(false))
-            .unwrap_or_else(|| "<none>".to_string());
-        let sink = attributes
-            .sink
-            .as_ref()
-            .map(|u| u.to_uri(false))
-            .unwrap_or_else(|| "<none>".to_string());
-
-        let local_ue = resolve_ue_id() as u32;
-        let source_ue = attributes.source.as_ref().map(|u| u.ue_id).unwrap_or_default();
-
-        let dedup_keys: Vec<String> = if self.rpc_dedup.enabled {
-            let mut keys = Vec::with_capacity(2);
-            if let Some(id) = attributes.id.as_ref() {
-                keys.push(format!(
-                    "reqid:{}-0x{:04X}",
-                    id.to_hyphenated_string(),
-                    method_id
-                ));
-            }
-
-            // Fallback key for anomalous paths where request IDs may not correlate
-            // across retries and the incoming source appears as local UE.
-            if source_ue == local_ue {
-                let sig = payload_signature(&req_bytes);
-                keys.push(format!(
-                    "fallback:srcue=0x{:08X}:method=0x{:04X}:sig=0x{:016X}",
-                    source_ue, method_id, sig
-                ));
-            }
-
-            keys
-        } else {
-            Vec::new()
-        };
-
-        if !dedup_keys.is_empty() {
-            let now = Instant::now();
-            let cached = {
-                let mut cache = self.rpc_dedup.cache.lock().map_err(|_| {
-                    ServiceInvocationError::Internal("failed to lock rpc dedup cache".to_string())
-                })?;
-                dedup_keys
-                    .iter()
-                    .find_map(|key| cache.get_valid_response(key, now).map(|resp| (key, resp)))
-            };
-
-            if let Some((matched_key, cached_resp)) = cached {
-                rpc_diag_log(format!(
-                    "server rpc_id={} phase=dedup_replay method_id=0x{:04X} req_key='{}' response_len={}",
-                    rpc_id,
-                    method_id,
-                    matched_key,
-                    cached_resp.len()
-                ));
-                let replay_payload =
-                    UPayload::new(cached_resp, UPayloadFormat::UPAYLOAD_FORMAT_RAW);
-                return Ok(Some(replay_payload));
-            }
-        }
-
-        rpc_diag_log(format!(
-            "server rpc_id={} phase=start method_id=0x{:04X} source='{}' sink='{}' payload_len={}",
-            rpc_id,
-            method_id,
-            source,
-            sink,
-            req_bytes.len()
-        ));
-
-        if rpc_diag_enabled() {
-            if let Some(src) = attributes.source.as_ref() {
-                if src.ue_id == local_ue {
-                    rpc_diag_log(format!(
-                        "WARN rpc_id={} request_source_matches_local_ue local_ue=0x{:04X} source='{}' sink='{}'",
-                        rpc_id,
-                        local_ue,
-                        source,
-                        sink
-                    ));
-                }
-            }
-        }
-
         let resp_bytes = (self.handler)(req_bytes).await;
-
-        if !dedup_keys.is_empty() {
-            let now = Instant::now();
-            let mut cache = self.rpc_dedup.cache.lock().map_err(|_| {
-                ServiceInvocationError::Internal("failed to lock rpc dedup cache".to_string())
-            })?;
-            for key in dedup_keys {
-                cache.insert_response(
-                    key,
-                    resp_bytes.clone(),
-                    now,
-                    self.rpc_dedup.ttl,
-                    self.rpc_dedup.max_entries,
-                );
-            }
-        }
-
-        rpc_diag_log(format!(
-            "server rpc_id={} phase=ok method_id=0x{:04X} elapsed_ms={} response_len={}",
-            rpc_id,
-            method_id,
-            start.elapsed().as_millis(),
-            resp_bytes.len()
-        ));
 
         let resp_payload = UPayload::new(resp_bytes, UPayloadFormat::UPAYLOAD_FORMAT_RAW);
         Ok(Some(resp_payload))
