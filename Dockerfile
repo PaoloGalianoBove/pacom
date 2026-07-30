@@ -86,7 +86,9 @@ RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
     cp "${PACOM_DIR}/target/release/examples/light_switch" /opt/pacom/bin/light_switch && \
     cp "${PACOM_DIR}/target/release/examples/light_dashboard" /opt/pacom/bin/light_dashboard && \
     cp "${PACOM_DIR}/target/release/examples/cloud_app" /opt/pacom/bin/cloud_app && \
+    cp "${PACOM_DIR}/target/release/examples/birthday_paradox" /opt/pacom/bin/birthday_paradox && \
     cp -r "${PACOM_DIR}/examples/mqtt_bridge" /opt/pacom/examples/ && \
+    cp -r "${PACOM_DIR}/examples/birthday_paradox" /opt/pacom/examples/ && \
     cp -r "${PACOM_DIR}/examples/rtt" /opt/pacom/examples/
 
 FROM ubuntu:24.04 AS runtime

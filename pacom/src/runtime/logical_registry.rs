@@ -32,6 +32,10 @@ pub struct ManifestConfig {
     #[serde(default)]
     /// Topics published and subscribed to by the application.
     pub topics: TopicManifest,
+    #[serde(skip)]
+    pub resolved_rpc_ids: HashMap<String, u16>,
+    #[serde(skip)]
+    pub resolved_topic_ids: HashMap<String, u16>,
 }
 
 impl ManifestConfig {
@@ -39,20 +43,27 @@ impl ManifestConfig {
     /// Returns a default (empty) manifest on any I/O or parse failure,
     /// and logs the reason to ease diagnostics.
     pub fn load(path: &str) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut config = match std::fs::read_to_string(path) {
             Ok(content) => match serde_json::from_str::<ManifestConfig>(&content) {
-                Ok(config) => return config,
-                Err(e) => eprintln!(
-                    "[PACOM][Manifest] Invalid JSON in '{}': {}. Falling back to empty manifest.",
-                    path, e
-                ),
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "[PACOM][Manifest] Invalid JSON in '{}': {}. Falling back to empty manifest.",
+                        path, e
+                    );
+                    ManifestConfig::default()
+                }
             },
-            Err(e) => eprintln!(
-                "[PACOM][Manifest] Failed to read '{}': {}. Falling back to empty manifest.",
-                path, e
-            ),
-        }
-        ManifestConfig::default()
+            Err(e) => {
+                eprintln!(
+                    "[PACOM][Manifest] Failed to read '{}': {}. Falling back to empty manifest.",
+                    path, e
+                );
+                ManifestConfig::default()
+            }
+        };
+        config.resolve_and_store_ids();
+        config
     }
 
     /// Loads the manifest from the `PACOM_MANIFEST_PATH` environment variable,
@@ -61,6 +72,32 @@ impl ManifestConfig {
         let path = std::env::var("PACOM_MANIFEST_PATH")
             .unwrap_or_else(|_| "/etc/pacom/manifest.json".to_string());
         Self::load(&path)
+    }
+
+    // ── ID Resolution ──────────────────────────────────────────
+
+    pub fn resolve_and_store_ids(&mut self) {
+        let mut rpc_used = HashSet::new();
+        for name in &self.rpc.provide {
+            let mut id = stable_id16("rpc", name) & 0x7FFF;
+            if id == 0 { id = 1; }
+            while rpc_used.contains(&id) {
+                id = (id.wrapping_add(1)) & 0x7FFF;
+                if id == 0 { id = 1; }
+            }
+            rpc_used.insert(id);
+            self.resolved_rpc_ids.insert(name.clone(), id);
+        }
+
+        let mut topic_used = HashSet::new();
+        for name in &self.topics.publish {
+            let mut id = stable_id16("topic", name) | 0x8000;
+            while topic_used.contains(&id) {
+                id = (id.wrapping_add(1)) | 0x8000;
+            }
+            topic_used.insert(id);
+            self.resolved_topic_ids.insert(name.clone(), id);
+        }
     }
 
     // ── Lookup helpers ─────────────────────────────────────────
@@ -89,66 +126,25 @@ impl ManifestConfig {
 
     /// Returns a deterministic method ID in `[0x0001, 0x7FFF]` for an RPC name.
     pub fn method_id_for(&self, logical_method: &str) -> u16 {
+        if let Some(&id) = self.resolved_rpc_ids.get(logical_method) {
+            return id;
+        }
         let id = stable_id16("rpc", logical_method) & 0x7FFF;
         if id == 0 { 1 } else { id }
     }
 
     /// Returns a deterministic resource ID in `[0x8000, 0xFFFF]` for a topic name.
     pub fn resource_id_for(&self, logical_topic: &str) -> u16 {
+        if let Some(&id) = self.resolved_topic_ids.get(logical_topic) {
+            return id;
+        }
         stable_id16("topic", logical_topic) | 0x8000
     }
 
-    // ── Collision detection ────────────────────────────────────
+    // ── Collision detection (Deprecated) ───────────────────────
 
-    /// Validates that no two distinct names inside this manifest
-    /// hash to the same numeric ID within the same namespace (rpc / topic).
-    /// Should be called once at runtime startup.
+    /// Kept for compatibility with `engine.rs` startup flow.
     pub fn validate_no_collisions(&self) -> Result<(), PacomError> {
-        self.check_rpc_collisions()?;
-        self.check_topic_collisions()?;
-        Ok(())
-    }
-
-    fn check_rpc_collisions(&self) -> Result<(), PacomError> {
-        let mut seen: HashMap<u16, &str> = HashMap::new();
-        for name in self.rpc.provide.iter().chain(self.rpc.consume.iter()) {
-            let id = self.method_id_for(name);
-            if let Some(&existing) = seen.get(&id) {
-                if existing != name.as_str() {
-                    return Err(PacomError::IdCollision {
-                        name_a: existing.to_string(),
-                        name_b: name.clone(),
-                        id,
-                    });
-                }
-            } else {
-                seen.insert(id, name);
-            }
-        }
-        Ok(())
-    }
-
-    fn check_topic_collisions(&self) -> Result<(), PacomError> {
-        let mut seen: HashMap<u16, &str> = HashMap::new();
-        for name in self
-            .topics
-            .publish
-            .iter()
-            .chain(self.topics.subscribe.iter())
-        {
-            let id = self.resource_id_for(name);
-            if let Some(&existing) = seen.get(&id) {
-                if existing != name.as_str() {
-                    return Err(PacomError::IdCollision {
-                        name_a: existing.to_string(),
-                        name_b: name.clone(),
-                        id,
-                    });
-                }
-            } else {
-                seen.insert(id, name);
-            }
-        }
         Ok(())
     }
 }

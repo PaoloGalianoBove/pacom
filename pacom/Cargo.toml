@@ -41,3 +41,6 @@ path = "examples/mqtt_bridge/light-switch/main.rs"
 name = "cloud_app"
 path = "examples/mqtt_bridge/cloud-app/main.rs"
 
+[[example]]
+name = "birthday_paradox"
+path = "examples/birthday_paradox/main.rs"

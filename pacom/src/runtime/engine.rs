@@ -67,12 +67,13 @@ struct ProviderInfo {
     authority: String,
     ue_id: u16,
     major_version: u8,
+    resource_id: u16,
 }
 
 fn provider_dbg(p: &ProviderInfo) -> String {
     format!(
-        "authority='{}' ue=0x{:04X} major={}",
-        p.authority, p.ue_id, p.major_version
+        "authority='{}' ue=0x{:04X} major={} resource=0x{:04X}",
+        p.authority, p.ue_id, p.major_version, p.resource_id
     )
 }
 
@@ -97,12 +98,13 @@ struct DiscoveryEvent {
     provider_authority: String,
     #[serde(default = "default_protocol_version")]
     protocol_version: u16,
+    resource_id: u16,
 }
 
 /// A pending subscription waiting for the publisher to announce itself via Discovery.
 struct PendingSubscription {
     listener: Arc<dyn UListener>,
-    resource_id: u16,
+    expected_resource_id: Option<Arc<std::sync::atomic::AtomicU16>>,
     source_authority: Option<String>,
 }
 
@@ -162,6 +164,7 @@ impl UListener for DiscoveryListener {
                     ue_id: event.provider_ue_id,
                     authority: effective_authority.clone(),
                     major_version: event.major_version,
+                    resource_id: event.resource_id,
                 };
 
                 match event.kind.as_str() {
@@ -234,8 +237,11 @@ impl UListener for DiscoveryListener {
                                     &effective_authority,
                                     provider.ue_id as u32,
                                     event.major_version,
-                                    sub.resource_id,
+                                    event.resource_id,
                                 ) {
+                                    if let Some(atomic_id) = &sub.expected_resource_id {
+                                        atomic_id.store(event.resource_id, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                     dbg_log("Runtime",format!(
                                         "DiscoveryListener: activating pending listener topic='{}' uri='{}'",
                                         event.name,
@@ -244,7 +250,7 @@ impl UListener for DiscoveryListener {
                                     dbg_log("Runtime",format!(
                                         "Pending subscription activate: topic='{}' resource_id=0x{:04X} uri={}",
                                         event.name,
-                                        sub.resource_id,
+                                        event.resource_id,
                                         uri_dbg(&uri)
                                     ));
                                     match self
@@ -272,7 +278,7 @@ impl UListener for DiscoveryListener {
                                         effective_authority,
                                         provider.ue_id,
                                         event.major_version,
-                                        sub.resource_id
+                                        event.resource_id
                                     ));
                                 }
                             }
@@ -490,14 +496,15 @@ impl RuntimeEngine {
         let discovery_task = Arc::new(Mutex::new(None));
 
         if has_vsomeip {
-            let handle = spawn_discovery_reannounce_task(
+            let task = spawn_discovery_reannounce_task(
                 router.clone(),
                 provided_capabilities.clone(),
                 ue_id,
+                manifest.clone(),
                 shutdown_rx,
             );
             if let Ok(mut guard) = discovery_task.lock() {
-                *guard = Some(handle);
+                *guard = Some(task);
             }
         } else {
             dbg_log("Runtime","Skipping discovery reannounce task because vSomeIP transport is disabled");
@@ -553,6 +560,12 @@ impl RuntimeEngine {
         )
         .map_err(|e| PacomError::Config(format!("Invalid discovery URI: {e:?}")))?;
 
+        let resource_id = if kind == "rpc_provide" {
+            self.manifest.method_id_for(name)
+        } else {
+            self.manifest.resource_id_for(name)
+        };
+
         let event = DiscoveryEvent {
             kind: kind.to_string(),
             name: name.to_string(),
@@ -560,6 +573,7 @@ impl RuntimeEngine {
             major_version: 1, // Standard major version
             provider_authority: authority,
             protocol_version: default_protocol_version(),
+            resource_id,
         };
 
         dbg_log("Runtime",format!(
@@ -698,8 +712,12 @@ impl RuntimeEngine {
         }
 
         let resource_id = self.manifest.resource_id_for(topic_name);
+        let expected_resource_id = Arc::new(std::sync::atomic::AtomicU16::new(
+            if is_cloud_topic(topic_name) { resource_id } else { 0 }
+        ));
+        
         let listener: Arc<dyn UListener> = Arc::new(ClosureListener {
-            expected_resource_id: resource_id,
+            expected_resource_id: expected_resource_id.clone(),
             callback: Box::new(callback),
         });
 
@@ -740,7 +758,7 @@ impl RuntimeEngine {
                 &info.authority,
                 info.ue_id as u32,
                 info.major_version,
-                resource_id,
+                info.resource_id,
             )
             .map_err(|e| PacomError::Config(format!("Invalid subscribe topic URI: {e:?}")))?;
             dbg_log("Runtime",format!(
@@ -772,7 +790,7 @@ impl RuntimeEngine {
                     .or_default()
                     .push(PendingSubscription {
                         listener,
-                        resource_id,
+                        expected_resource_id: Some(expected_resource_id),
                         source_authority: None,
                     });
                 dbg_log("Runtime",format!("subscribe pending topic='{}'", topic_name));
@@ -805,8 +823,12 @@ impl RuntimeEngine {
         }
 
         let resource_id = self.manifest.resource_id_for(topic_name);
+        let expected_resource_id = Arc::new(std::sync::atomic::AtomicU16::new(
+            if self.router.is_cloud_authority(authority) || is_cloud_topic(topic_name) { resource_id } else { 0 }
+        ));
+
         let listener: Arc<dyn UListener> = Arc::new(ClosureListener {
-            expected_resource_id: resource_id,
+            expected_resource_id: expected_resource_id.clone(),
             callback: Box::new(callback),
         });
 
@@ -856,7 +878,7 @@ impl RuntimeEngine {
                         .or_default()
                         .push(PendingSubscription {
                             listener,
-                            resource_id,
+                            expected_resource_id: Some(expected_resource_id),
                             source_authority: Some(authority.to_string()),
                         });
                     let total_pending = map.values().map(|v| v.len()).sum::<usize>();
@@ -884,14 +906,13 @@ impl RuntimeEngine {
             });
         }
 
-        let method_id = self.manifest.method_id_for(service_name);
         let info = self.resolve_rpc_provider_with_retry(service_name).await?;
 
         let method_uri = UUri::try_from_parts(
             &info.authority,
             info.ue_id as u32,
             info.major_version,
-            method_id,
+            info.resource_id,
         )
         .map_err(|e| PacomError::Config(format!("Invalid method URI: {e:?}")))?;
 
@@ -1051,6 +1072,7 @@ fn spawn_discovery_reannounce_task(
     router: Arc<PacomRouter>,
     provided_capabilities: Arc<RwLock<ProvidedCapabilities>>,
     local_ue_id: u16,
+    manifest: ManifestConfig,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1097,11 +1119,12 @@ fn spawn_discovery_reannounce_task(
                 ) {
                     let event = DiscoveryEvent {
                         kind: "rpc_provide".to_string(),
-                        name: service,
+                        name: service.clone(),
                         provider_ue_id: local_ue_id,
                         major_version: 1,
                         provider_authority: authority,
                         protocol_version: default_protocol_version(),
+                        resource_id: manifest.method_id_for(&service),
                     };
                     let _ = send_discovery_event(&router, source, event).await;
                 }
@@ -1117,11 +1140,12 @@ fn spawn_discovery_reannounce_task(
                 ) {
                     let event = DiscoveryEvent {
                         kind: "topic_publish".to_string(),
-                        name: topic,
+                        name: topic.clone(),
                         provider_ue_id: topic_publish_ue_id,
                         major_version: 1,
                         provider_authority: authority,
                         protocol_version: default_protocol_version(),
+                        resource_id: manifest.resource_id_for(&topic),
                     };
                     let _ = send_discovery_event(&router, source, event).await;
                 }
@@ -1218,7 +1242,7 @@ fn resolve_ue_id() -> u16 {
 
 /// Internal adapter from uProtocol listener callbacks to byte closures.
 struct ClosureListener {
-    expected_resource_id: u16,
+    expected_resource_id: Arc<std::sync::atomic::AtomicU16>,
     callback: Box<dyn Fn(Vec<u8>) + Send + Sync + 'static>,
 }
 
@@ -1238,9 +1262,10 @@ impl UListener for ClosureListener {
                 .as_ref()
                 .map(|u| u.to_uri(false))
                 .unwrap_or_else(|| "<none>".to_string());
+            let expected = self.expected_resource_id.load(std::sync::atomic::Ordering::Relaxed);
             dbg_log("Runtime",format!(
                 "ClosureListener received message: expected_resource_id={}, source_uri={}, sink_uri={}, payload_len={}",
-                self.expected_resource_id,
+                expected,
                 source_uri,
                 sink_uri,
                 message.payload.as_ref().map(|p| p.len()).unwrap_or(0)
@@ -1249,10 +1274,11 @@ impl UListener for ClosureListener {
 
         if let Some(attributes) = message.attributes.into_option() {
             if let Some(source) = attributes.source.into_option() {
-                if source.resource_id != self.expected_resource_id as u32 {
+                let expected = self.expected_resource_id.load(std::sync::atomic::Ordering::Relaxed);
+                if expected != 0 && source.resource_id != expected as u32 {
                     dbg_log("Runtime",format!(
                         "ClosureListener dropped message: expected_resource_id={}, got_resource_id={}",
-                        self.expected_resource_id, source.resource_id
+                        expected, source.resource_id
                     ));
                     return; // Ignore messages intended for other topics (MQTT broadcast workaround)
                 }
@@ -1263,9 +1289,10 @@ impl UListener for ClosureListener {
             dbg_log("Runtime","ClosureListener: message has no attributes");
         }
         if let Some(payload) = message.payload {
+            let expected = self.expected_resource_id.load(std::sync::atomic::Ordering::Relaxed);
             dbg_log("Runtime",format!(
                 "ClosureListener delivering payload: resource_id={}, payload_len={}",
-                self.expected_resource_id,
+                expected,
                 payload.len()
             ));
             (self.callback)(payload.to_vec());
