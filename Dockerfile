@@ -58,11 +58,20 @@ ENV WORKSPACE_ROOT="${WORKSPACE_ROOT}"
 ENV PACOM_DIR="${WORKSPACE_ROOT}/pacom"
 
 WORKDIR ${WORKSPACE_ROOT}
-COPY --chown=${USERNAME}:${USERNAME} ./pacom ${PACOM_DIR}
+# 1. Copia SOLO i file di definizione per sfruttare la cache di Docker
+COPY --chown=${USERNAME}:${USERNAME} ./pacom/Cargo.toml ./pacom/Cargo.lock ${PACOM_DIR}/
 WORKDIR ${PACOM_DIR}
 
-# Build pacom once in dev image to prime Cargo cache and compile native vsomeip dependency.
-RUN cargo build --examples
+# 2. Crea un progetto dummy e compila per scaricare/compilare tutte le dipendenze (incluso vSomeIP C++) in debug e release
+RUN mkdir src && echo "pub fn dummy() {}" > src/lib.rs && \
+    grep 'path = ' Cargo.toml | awk -F'"' '{print $2}' | while read f; do mkdir -p $(dirname "$f") && echo "fn main() {}" > "$f"; done && \
+    cargo build --lib && cargo build --release --lib
+
+# 3. Ora copia il vero codice sorgente (se modifichi il codice, Docker riparte da qui senza ricompilare le librerie esterne)
+COPY --chown=${USERNAME}:${USERNAME} ./pacom ${PACOM_DIR}
+
+# 4. Build effettivo
+RUN touch src/lib.rs && cargo build --examples
 
 USER root
 # Make vsomeip runtime libs globally visible through the dynamic loader in dev containers.
@@ -86,7 +95,9 @@ RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
     cp "${PACOM_DIR}/target/release/examples/light_switch" /opt/pacom/bin/light_switch && \
     cp "${PACOM_DIR}/target/release/examples/light_dashboard" /opt/pacom/bin/light_dashboard && \
     cp "${PACOM_DIR}/target/release/examples/cloud_app" /opt/pacom/bin/cloud_app && \
-    cp "${PACOM_DIR}/target/release/examples/birthday_paradox" /opt/pacom/bin/birthday_paradox && \
+    cp "${PACOM_DIR}/target/release/examples/birthday_paradox" /opt/pacom/bin/birthday_paradox || true && \
+    cp "${PACOM_DIR}/target/release/examples/birthday_paradox_pub" /opt/pacom/bin/birthday_paradox_pub || true && \
+    cp "${PACOM_DIR}/target/release/examples/birthday_paradox_sub" /opt/pacom/bin/birthday_paradox_sub || true && \
     cp -r "${PACOM_DIR}/examples/mqtt_bridge" /opt/pacom/examples/ && \
     cp -r "${PACOM_DIR}/examples/birthday_paradox" /opt/pacom/examples/ && \
     cp -r "${PACOM_DIR}/examples/rtt" /opt/pacom/examples/

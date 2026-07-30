@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     unsafe {
         std::env::set_var("UP_UE_ID", "21761"); // 0x5501
         if std::env::var("PACOM_MANIFEST_PATH").is_err() {
-            std::env::set_var("PACOM_MANIFEST_PATH", "examples/birthday_paradox/manifest.json");
+            std::env::set_var("PACOM_MANIFEST_PATH", "examples/birthday_paradox/publisher/manifest.json");
         }
     }
 
@@ -23,14 +23,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Inizializza il runtime
-    let _runtime = PacomRuntime::new(config).await?;
+    let runtime = PacomRuntime::new(config).await?;
 
     println!("[Birthday Paradox] PacomRuntime started successfully!");
+    println!("[Birthday Paradox] Waiting 3 seconds to allow Subscriber to discover our service...");
+    sleep(Duration::from_secs(3)).await;
+
     println!("[Birthday Paradox] If you see this message, the PACOM-SD Gossip Protocol successfully resolved all ID collisions dynamically!");
 
     // Keep the main thread alive
-    sleep(Duration::from_secs(2)).await;
+    // We loop 10 times to ensure vsomeip has enough time to establish routing.
+    // Processing 400 multicast Discovery messages and 400 Subscribe requests takes a few seconds.
+    // The first iterations will trigger the Discovery announcements and might drop payloads.
+    // The subsequent iterations will successfully transmit data once routes are open.
+    for iter in 1..=10 {
+        sleep(Duration::from_secs(1)).await;
+        for i in 0..400 {
+            let topic_name = format!("/topic/sensor_{}", i);
+            let payload = format!("Message {} for {}", iter, topic_name).into_bytes();
+            let _ = runtime.publish(&topic_name, payload).await;
+        }
+    }
 
+    println!("[Birthday Paradox] Finished publishing 4000 messages total.");
     println!("[Birthday Paradox] Exiting smoothly.");
     Ok(())
 }
