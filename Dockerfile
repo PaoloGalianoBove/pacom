@@ -79,10 +79,15 @@ WORKDIR ${PACOM_DIR}
 RUN cargo build --release --examples
 
 USER root
-RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom-runtime/bin && \
+RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
     find "${PACOM_DIR}/target" -type f -name 'libvsomeip*.so*' -exec cp -a {} /opt/pacom-runtime/lib/ \; && \
-    cp "${PACOM_DIR}/target/release/examples/server" /opt/pacom-runtime/bin/pacom-server && \
-    cp "${PACOM_DIR}/target/release/examples/client" /opt/pacom-runtime/bin/pacom-client
+    cp "${PACOM_DIR}/target/release/examples/rtt_server" /opt/pacom/bin/pacom-server && \
+    cp "${PACOM_DIR}/target/release/examples/rtt_client" /opt/pacom/bin/pacom-client && \
+    cp "${PACOM_DIR}/target/release/examples/light_switch" /opt/pacom/bin/light_switch && \
+    cp "${PACOM_DIR}/target/release/examples/light_dashboard" /opt/pacom/bin/light_dashboard && \
+    cp "${PACOM_DIR}/target/release/examples/cloud_app" /opt/pacom/bin/cloud_app && \
+    cp -r "${PACOM_DIR}/examples/mqtt_bridge" /opt/pacom/examples/ && \
+    cp -r "${PACOM_DIR}/examples/rtt" /opt/pacom/examples/
 
 FROM ubuntu:24.04 AS runtime
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -99,8 +104,8 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opt/pacom-runtime/lib/ /usr/local/lib/
-COPY --from=builder /opt/pacom-runtime/bin/pacom-server /usr/local/bin/pacom-server
-COPY --from=builder /opt/pacom-runtime/bin/pacom-client /usr/local/bin/pacom-client
+COPY --from=builder /opt/pacom/ /opt/pacom/
+RUN ln -s /opt/pacom/bin/* /usr/local/bin/
 
 RUN ldconfig
 

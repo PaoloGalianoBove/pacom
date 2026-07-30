@@ -25,38 +25,7 @@ use std::sync::Mutex;
 const DISCOVERY_UE_ID: u16 = 0x0F00;
 const DISCOVERY_RESOURCE_ID: u16 = 0x8F01;
 
-fn verbose_debug_enabled() -> bool {
-    std::env::var("PACOM_DEBUG_VERBOSE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false)
-}
-
-fn dbg_log(msg: impl AsRef<str>) {
-    if verbose_debug_enabled() {
-        println!("[PACOM-DBG][Runtime] {}", msg.as_ref());
-    }
-}
-
-fn uri_dbg(uri: &UUri) -> String {
-    format!(
-        "{} [auth='{}', ue=0x{:08X}, ver={}, res=0x{:08X}]",
-        uri.to_uri(false),
-        uri.authority_name(),
-        uri.ue_id,
-        uri.ue_version_major,
-        uri.resource_id
-    )
-}
-
-fn provider_dbg(p: &ProviderInfo) -> String {
-    format!(
-        "authority='{}' ue=0x{:04X} major={}",
-        p.authority, p.ue_id, p.major_version
-    )
-}
+use crate::utils::{dbg_log, uri_dbg, verbose_debug_enabled};
 
 fn payload_preview(bytes: &[u8], max: usize) -> String {
     bytes
@@ -67,21 +36,16 @@ fn payload_preview(bytes: &[u8], max: usize) -> String {
         .join(" ")
 }
 
-fn wildcard_local_subscribe_enabled() -> bool {
-    std::env::var("PACOM_ENABLE_LOCAL_WILDCARD_SUBSCRIBE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false)
-}
-
 fn is_cloud_topic(name: &str) -> bool {
     name.trim().starts_with("/cloud/")
 }
 
-fn cloud_authority_name() -> String {
-    std::env::var("PACOM_CLOUD_AUTHORITY").unwrap_or_else(|_| "cloud.bridge".to_string())
+pub(crate) fn cloud_authority_name() -> Result<String, PacomError> {
+    std::env::var("PACOM_CLOUD_AUTHORITY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| PacomError::Config("PACOM_CLOUD_AUTHORITY environment variable must be set for cloud operations".to_string()))
 }
 
 fn cloud_wildcard_source_uri(resource_id: u16) -> Result<UUri, PacomError> {
@@ -100,9 +64,16 @@ fn default_protocol_version() -> u16 {
 
 #[derive(Clone, Debug)]
 struct ProviderInfo {
-    ue_id: u16,
     authority: String,
+    ue_id: u16,
     major_version: u8,
+}
+
+fn provider_dbg(p: &ProviderInfo) -> String {
+    format!(
+        "authority='{}' ue=0x{:04X} major={}",
+        p.authority, p.ue_id, p.major_version
+    )
 }
 
 #[derive(Default)]
@@ -163,7 +134,7 @@ impl UListener for DiscoveryListener {
             .map(|s| s.authority_name().to_string())
             .unwrap_or_default();
 
-        dbg_log(format!(
+        dbg_log("Runtime",format!(
             "DiscoveryListener on_receive: source={} sink={} payload_len={}",
             source_uri_dbg,
             sink_uri_dbg,
@@ -172,7 +143,7 @@ impl UListener for DiscoveryListener {
 
         if let Some(payload) = message.payload {
             if let Ok(event) = serde_json::from_slice::<DiscoveryEvent>(&payload) {
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "Discovery event received: kind='{}', name='{}', provider_ue=0x{:04x}, envelope_authority='{}', provider_authority='{}'",
                     event.kind,
                     event.name,
@@ -199,7 +170,7 @@ impl UListener for DiscoveryListener {
                             cache
                                 .rpc_providers
                                 .insert(event.name.clone(), provider.clone());
-                            dbg_log(format!(
+                            dbg_log("Runtime",format!(
                                 "Discovery cache update: rpc_providers size={} latest name='{}' provider={}",
                                 cache.rpc_providers.len(),
                                 event.name,
@@ -208,7 +179,7 @@ impl UListener for DiscoveryListener {
                         }
                     }
                     "topic_publish" => {
-                        dbg_log(format!(
+                        dbg_log("Runtime",format!(
                             "DiscoveryListener: received topic_publish name='{}' provider_ue=0x{:04X}",
                             event.name, event.provider_ue_id
                         ));
@@ -216,7 +187,7 @@ impl UListener for DiscoveryListener {
                             cache
                                 .topic_publishers
                                 .insert(event.name.clone(), provider.clone());
-                            dbg_log(format!(
+                            dbg_log("Runtime",format!(
                                 "Discovery cache update: topic_publishers size={} latest name='{}' provider={}",
                                 cache.topic_publishers.len(),
                                 event.name,
@@ -231,7 +202,7 @@ impl UListener for DiscoveryListener {
                         let pending = {
                             if let Ok(mut map) = self.pending_subs.lock() {
                                 let out = map.remove(&event.name);
-                                dbg_log(format!(
+                                dbg_log("Runtime",format!(
                                     "Pending map lookup: topic='{}' found={} remaining_topics={}",
                                     event.name,
                                     out.as_ref().map(|v| !v.is_empty()).unwrap_or(false),
@@ -244,7 +215,7 @@ impl UListener for DiscoveryListener {
                         };
 
                         if let Some(subs) = pending {
-                            dbg_log(format!(
+                            dbg_log("Runtime",format!(
                                 "Pending subscriptions found for '{}': count={}",
                                 event.name,
                                 subs.len()
@@ -265,12 +236,12 @@ impl UListener for DiscoveryListener {
                                     event.major_version,
                                     sub.resource_id,
                                 ) {
-                                    dbg_log(format!(
+                                    dbg_log("Runtime",format!(
                                         "DiscoveryListener: activating pending listener topic='{}' uri='{}'",
                                         event.name,
                                         uri.to_uri(false)
                                     ));
-                                    dbg_log(format!(
+                                    dbg_log("Runtime",format!(
                                         "Pending subscription activate: topic='{}' resource_id=0x{:04X} uri={}",
                                         event.name,
                                         sub.resource_id,
@@ -281,12 +252,12 @@ impl UListener for DiscoveryListener {
                                         .register_listener(&uri, None, sub.listener)
                                         .await
                                     {
-                                        Ok(_) => dbg_log(format!(
+                                        Ok(_) => dbg_log("Runtime",format!(
                                             "register_listener ok for '{}' on {}",
                                             event.name,
                                             uri.to_uri(false)
                                         )),
-                                        Err(e) => dbg_log(format!(
+                                        Err(e) => dbg_log("Runtime",format!(
                                             "register_listener failed for '{}' on {}: code={:?}, message={:?}",
                                             event.name,
                                             uri.to_uri(false),
@@ -295,7 +266,7 @@ impl UListener for DiscoveryListener {
                                         )),
                                     }
                                 } else {
-                                    dbg_log(format!(
+                                    dbg_log("Runtime",format!(
                                         "Pending subscription skipped: invalid URI build topic='{}' effective_authority='{}' ue=0x{:04X} major={} resource=0x{:04X}",
                                         event.name,
                                         effective_authority,
@@ -314,28 +285,28 @@ impl UListener for DiscoveryListener {
                                 }
                             }
                         } else {
-                            dbg_log(format!(
+                            dbg_log("Runtime",format!(
                                 "DiscoveryListener: no pending subscriptions for topic='{}'",
                                 event.name
                             ));
                         }
                     }
                     _ => {
-                        dbg_log(format!(
+                        dbg_log("Runtime",format!(
                             "Discovery event ignored: unknown kind='{}' name='{}'",
                             event.kind, event.name
                         ));
                     }
                 }
             } else {
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "Discovery payload parse failed: payload_len={} preview={}...",
                     payload.len(),
                     payload_preview(&payload, 24)
                 ));
             }
         } else {
-            dbg_log("DiscoveryListener received message without payload");
+            dbg_log("Runtime","DiscoveryListener received message without payload");
         }
     }
 }
@@ -358,6 +329,9 @@ pub struct RuntimeConfig {
     /// If `None`, falls back to `PACOM_MANIFEST_PATH` env var,
     /// then to `/etc/pacom/manifest.json`.
     pub manifest_path: Option<String>,
+    /// Optional logical identity of this node/application.
+    /// Falls back to `UP_AUTHORITY` env var, then `HOSTNAME`, then "local_ecu".
+    pub authority: Option<String>,
 }
 
 /// Core runtime engine that binds logical operations to transports.
@@ -401,20 +375,24 @@ impl RuntimeEngine {
         };
         manifest.validate_no_collisions()?;
 
-        // 1. Resolve authority/ECU name and application UE_ID dynamically from environment
-        let authority = resolve_authority();
+        // 1. Resolve authority/ECU name and application UE_ID dynamically from config or environment
+        let authority = config
+            .authority
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| resolve_authority());
         let ue_id = resolve_ue_id();
-        dbg_log(format!(
+        dbg_log("Runtime",format!(
             "RuntimeEngine::new authority='{}' ue_id=0x{:04x} mqtt_enabled={} manifest_path={:?}",
             authority,
             ue_id,
             config.mqtt_config.is_some(),
             config.manifest_path
         ));
-        dbg_log(format!(
-            "RuntimeEngine::new flags: PACOM_DISABLE_VSOMEIP={:?} PACOM_ENABLE_LOCAL_WILDCARD_SUBSCRIBE={}",
-            std::env::var("PACOM_DISABLE_VSOMEIP").ok(),
-            wildcard_local_subscribe_enabled()
+        dbg_log("Runtime",format!(
+            "RuntimeEngine::new flags: PACOM_DISABLE_VSOMEIP={:?}",
+            std::env::var("PACOM_DISABLE_VSOMEIP").ok()
         ));
 
         // 2. Set up the local vSomeIP transport (Router or Client) if not disabled
@@ -484,7 +462,7 @@ impl RuntimeEngine {
         });
 
         if needs_vsomeip_discovery {
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "Registering discovery listeners on {} channels",
                 discovery_channel_count()
             ));
@@ -497,7 +475,7 @@ impl RuntimeEngine {
                     DISCOVERY_RESOURCE_ID,
                 )
                 .map_err(|e| PacomError::Config(format!("Failed to build discovery URI: {e:?}")))?;
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "Register discovery listener channel={} uri={}",
                     i,
                     uri_dbg(&discovery_uri)
@@ -522,7 +500,7 @@ impl RuntimeEngine {
                 *guard = Some(handle);
             }
         } else {
-            dbg_log("Skipping discovery reannounce task because vSomeIP transport is disabled");
+            dbg_log("Runtime","Skipping discovery reannounce task because vSomeIP transport is disabled");
         }
 
         Ok(Self {
@@ -584,7 +562,7 @@ impl RuntimeEngine {
             protocol_version: default_protocol_version(),
         };
 
-        dbg_log(format!(
+        dbg_log("Runtime",format!(
             "announce_discovery kind='{}' name='{}' channel={} source={}",
             event.kind,
             event.name,
@@ -616,8 +594,8 @@ impl RuntimeEngine {
         }
 
         if is_cloud_topic(topic_name) {
-            let cloud_authority = cloud_authority_name();
-            dbg_log(format!(
+            let cloud_authority = cloud_authority_name()?;
+            dbg_log("Runtime",format!(
                 "publish topic='{}' routed as cloud-bound authority='{}'",
                 topic_name, cloud_authority
             ));
@@ -637,7 +615,7 @@ impl RuntimeEngine {
                 .build_with_payload(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW)
                 .map_err(|e| PacomError::Config(format!("Failed to build message: {e:?}")))?;
 
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "publish topic='{}' uri='{}' payload_len={} topic_publish_ue=0x{:04X} app_ue=0x{:04X}",
                 topic_name,
                 msg.attributes
@@ -692,7 +670,7 @@ impl RuntimeEngine {
             .build_with_payload(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW)
             .map_err(|e| PacomError::Config(format!("Failed to build message: {e:?}")))?;
 
-        dbg_log(format!(
+        dbg_log("Runtime",format!(
             "publish_to_authority topic='{}' target='{}' payload_len={}",
             topic_name,
             authority,
@@ -726,11 +704,11 @@ impl RuntimeEngine {
         });
 
         if is_cloud_topic(topic_name) {
-            let cloud_authority = cloud_authority_name();
+            let cloud_authority = cloud_authority_name()?;
             let source_filter = cloud_wildcard_source_uri(resource_id)?;
             let sink_filter = cloud_sink_marker_uri(&cloud_authority)?;
 
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "subscribe topic='{}' resolved as cloud listener source='{}' sink='{}'",
                 topic_name,
                 source_filter.to_uri(false),
@@ -743,36 +721,11 @@ impl RuntimeEngine {
             return Ok(());
         }
 
-        dbg_log(format!(
-            "subscribe topic='{}' resource_id=0x{:04X} wildcard_fallback_enabled={}",
+        dbg_log("Runtime",format!(
+            "subscribe topic='{}' resource_id=0x{:04X}",
             topic_name,
-            resource_id,
-            wildcard_local_subscribe_enabled()
+            resource_id
         ));
-
-        // Optional fallback for startup races. Disabled by default because broad
-        // wildcards can create ambiguous SOME/IP registrations in mixed deployments.
-        if wildcard_local_subscribe_enabled() {
-            if let Ok(wildcard_uri) = UUri::try_from_parts("*", 0xFFFF, 0xFF, resource_id) {
-                match self
-                    .router
-                    .register_listener(&wildcard_uri, None, listener.clone())
-                    .await
-                {
-                    Ok(_) => dbg_log(format!(
-                        "subscribe wildcard listener registered for topic='{}' uri='{}'",
-                        topic_name,
-                        wildcard_uri.to_uri(false)
-                    )),
-                    Err(e) => dbg_log(format!(
-                        "subscribe wildcard listener failed for topic='{}' uri='{}': code={:?}",
-                        topic_name,
-                        wildcard_uri.to_uri(false),
-                        e.code
-                    )),
-                }
-            }
-        }
 
         // Check if we already know who publishes this topic from a prior discovery event.
         let maybe_info = self
@@ -790,26 +743,26 @@ impl RuntimeEngine {
                 resource_id,
             )
             .map_err(|e| PacomError::Config(format!("Invalid subscribe topic URI: {e:?}")))?;
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "subscribe: provider already known topic='{}' register_listener uri='{}'",
                 topic_name,
                 uri.to_uri(false)
             ));
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "subscribe immediate topic='{}' using provider authority='{}' ue=0x{:04x} uri='{}'",
                 topic_name,
                 info.authority,
                 info.ue_id,
                 uri.to_uri(false)
             ));
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "subscribe immediate provider={}",
                 provider_dbg(&info)
             ));
             self.router.register_listener(&uri, None, listener).await?;
         } else {
             // Publisher not yet known: enqueue as pending.
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "subscribe: provider not yet known topic='{}' enqueue pending",
                 topic_name
             ));
@@ -822,9 +775,9 @@ impl RuntimeEngine {
                         resource_id,
                         source_authority: None,
                     });
-                dbg_log(format!("subscribe pending topic='{}'", topic_name));
+                dbg_log("Runtime",format!("subscribe pending topic='{}'", topic_name));
                 let total_pending = map.values().map(|v| v.len()).sum::<usize>();
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "subscribe pending stats: pending_topics={} total_pending_subscriptions={}",
                     map.len(),
                     total_pending
@@ -852,40 +805,28 @@ impl RuntimeEngine {
         }
 
         let resource_id = self.manifest.resource_id_for(topic_name);
-        let temp_uri = UUri::try_from_parts(authority, 0, 0, 0)
-            .map_err(|e| PacomError::Config(format!("Invalid URI: {e:?}")))?;
-
         let listener: Arc<dyn UListener> = Arc::new(ClosureListener {
             expected_resource_id: resource_id,
             callback: Box::new(callback),
         });
 
-        dbg_log(format!(
-            "subscribe_from_authority topic='{}' target_authority='{}' resource_id=0x{:04X} cloud_bound={} wildcard_fallback_enabled={}",
+        let is_cloud = self.router.is_cloud_authority(authority) || is_cloud_topic(topic_name);
+        dbg_log("Runtime",format!(
+            "subscribe_from_authority topic='{}' target_authority='{}' resource_id=0x{:04X} cloud_bound={}",
             topic_name,
             authority,
             resource_id,
-            self.router.is_cloud_bound(&temp_uri),
-            wildcard_local_subscribe_enabled()
+            is_cloud
         ));
 
-        if self.router.is_cloud_bound(&temp_uri) {
+        if is_cloud {
             // For cross-domain subscriptions the MQTT transport routes by authority and
             // topic string, not by vSomeIP service ID. Use 0xFFFF as a neutral wildcard.
             let uri = UUri::try_from_parts(authority, 0xFFFF, 1, resource_id)
                 .map_err(|e| PacomError::Config(format!("Invalid subscribe URI: {e:?}")))?;
             self.router.register_listener(&uri, None, listener).await?;
         } else {
-            // Optional fallback for startup races. Disabled by default for the same
-            // reason as subscribe(): avoid overbroad SOME/IP wildcard registrations.
-            if wildcard_local_subscribe_enabled() {
-                if let Ok(wildcard_uri) = UUri::try_from_parts("*", 0xFFFF, 0xFF, resource_id) {
-                    let _ = self
-                        .router
-                        .register_listener(&wildcard_uri, None, listener.clone())
-                        .await;
-                }
-            }
+
 
             // For local (vSomeIP) subscriptions, use the same reactive mechanism as subscribe():
             // register immediately if we know the publisher, else enqueue as pending.
@@ -903,7 +844,7 @@ impl RuntimeEngine {
                     resource_id,
                 )
                 .map_err(|e| PacomError::Config(format!("Invalid subscribe URI: {e:?}")))?;
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "subscribe_from_authority immediate local provider={} uri={}",
                     provider_dbg(&info),
                     uri_dbg(&uri)
@@ -919,7 +860,7 @@ impl RuntimeEngine {
                             source_authority: Some(authority.to_string()),
                         });
                     let total_pending = map.values().map(|v| v.len()).sum::<usize>();
-                    dbg_log(format!(
+                    dbg_log("Runtime",format!(
                         "subscribe_from_authority pending stats: pending_topics={} total_pending_subscriptions={}",
                         map.len(),
                         total_pending
@@ -1009,7 +950,7 @@ impl RuntimeEngine {
         service_name: &str,
     ) -> Result<ProviderInfo, PacomError> {
         if let Some(info) = self.lookup_rpc_provider(service_name)? {
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "resolve_rpc_provider_with_retry immediate hit service='{}' provider={}",
                 service_name,
                 provider_dbg(&info)
@@ -1021,7 +962,7 @@ impl RuntimeEngine {
         let poll = discovery_poll_interval();
         let deadline = Instant::now() + timeout;
         let mut attempts: u64 = 0;
-        dbg_log(format!(
+        dbg_log("Runtime",format!(
             "resolve_rpc_provider_with_retry waiting service='{}' timeout_ms={} poll_ms={}",
             service_name,
             timeout.as_millis(),
@@ -1032,7 +973,7 @@ impl RuntimeEngine {
             sleep(poll).await;
             attempts += 1;
             if let Some(info) = self.lookup_rpc_provider(service_name)? {
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "resolve_rpc_provider_with_retry resolved service='{}' attempts={} provider={}",
                     service_name,
                     attempts,
@@ -1041,7 +982,7 @@ impl RuntimeEngine {
                 return Ok(info);
             }
             if attempts % 20 == 0 {
-                dbg_log(format!(
+                dbg_log("Runtime",format!(
                     "resolve_rpc_provider_with_retry still waiting service='{}' attempts={} elapsed_ms={}",
                     service_name,
                     attempts,
@@ -1114,7 +1055,7 @@ fn spawn_discovery_reannounce_task(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let interval = discovery_reannounce_interval();
-        dbg_log(format!(
+        dbg_log("Runtime",format!(
             "discovery reannounce task started interval_secs={}",
             interval.as_secs()
         ));
@@ -1123,7 +1064,7 @@ fn spawn_discovery_reannounce_task(
                 _ = sleep(interval) => {}
                 changed = shutdown_rx.changed() => {
                     if changed.is_ok() && *shutdown_rx.borrow() {
-                        dbg_log("discovery reannounce task stopped by shutdown signal");
+                        dbg_log("Runtime","discovery reannounce task stopped by shutdown signal");
                         break;
                     }
                 }
@@ -1139,7 +1080,7 @@ fn spawn_discovery_reannounce_task(
 
             let topic_publish_ue_id = RuntimeEngine::derive_topic_publish_ue_id(local_ue_id);
             let channel = (local_ue_id % discovery_channel_count()) as u16;
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "discovery reannounce tick: rpc_count={} topic_count={} channel={}",
                 services.len(),
                 topics.len(),
@@ -1201,7 +1142,7 @@ async fn send_discovery_event(
         .build_with_payload(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW)
         .map_err(|e| PacomError::Config(format!("Failed to build discovery message: {e:?}")))?;
 
-    dbg_log(format!(
+    dbg_log("Runtime",format!(
         "send_discovery_event kind='{}' name='{}' source={} payload_len={}",
         event.kind,
         event.name,
@@ -1214,9 +1155,9 @@ async fn send_discovery_event(
     ));
 
     match router.send(msg).await {
-        Ok(_) => dbg_log("send_discovery_event transport send result=ok"),
+        Ok(_) => dbg_log("Runtime","send_discovery_event transport send result=ok"),
         Err(e) => {
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "send_discovery_event transport send result=err code={:?} message={:?}",
                 e.code, e.message
             ));
@@ -1297,7 +1238,7 @@ impl UListener for ClosureListener {
                 .as_ref()
                 .map(|u| u.to_uri(false))
                 .unwrap_or_else(|| "<none>".to_string());
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "ClosureListener received message: expected_resource_id={}, source_uri={}, sink_uri={}, payload_len={}",
                 self.expected_resource_id,
                 source_uri,
@@ -1309,27 +1250,27 @@ impl UListener for ClosureListener {
         if let Some(attributes) = message.attributes.into_option() {
             if let Some(source) = attributes.source.into_option() {
                 if source.resource_id != self.expected_resource_id as u32 {
-                    dbg_log(format!(
+                    dbg_log("Runtime",format!(
                         "ClosureListener dropped message: expected_resource_id={}, got_resource_id={}",
                         self.expected_resource_id, source.resource_id
                     ));
                     return; // Ignore messages intended for other topics (MQTT broadcast workaround)
                 }
             } else {
-                dbg_log("ClosureListener: message has no source attribute");
+                dbg_log("Runtime","ClosureListener: message has no source attribute");
             }
         } else {
-            dbg_log("ClosureListener: message has no attributes");
+            dbg_log("Runtime","ClosureListener: message has no attributes");
         }
         if let Some(payload) = message.payload {
-            dbg_log(format!(
+            dbg_log("Runtime",format!(
                 "ClosureListener delivering payload: resource_id={}, payload_len={}",
                 self.expected_resource_id,
                 payload.len()
             ));
             (self.callback)(payload.to_vec());
         } else {
-            dbg_log("ClosureListener: message has no payload");
+            dbg_log("Runtime","ClosureListener: message has no payload");
         }
     }
 }

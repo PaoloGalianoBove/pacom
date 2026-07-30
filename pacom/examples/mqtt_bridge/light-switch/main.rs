@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             client_id: "light-switch-core".to_string(),
         }),
         manifest_path: Some(manifest_path.clone()),
+        authority: None,
     })
     .await
     {
@@ -45,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rt = PacomRuntime::new(RuntimeConfig {
                 mqtt_config: None,
                 manifest_path: Some(manifest_path),
+                authority: None,
             })
             .await?;
             Arc::new(rt)

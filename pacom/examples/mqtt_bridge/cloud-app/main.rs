@@ -26,6 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 client_id: "cloud-app-client".to_string(),
             }),
             manifest_path: Some(manifest_path),
+            authority: None,
         })
         .await?,
     );

@@ -16,6 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = PacomRuntime::new(RuntimeConfig {
         mqtt_config: None,
         manifest_path: Some(manifest_path),
+        authority: None,
     })
     .await?;
 

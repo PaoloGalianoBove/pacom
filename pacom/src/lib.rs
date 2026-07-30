@@ -6,6 +6,7 @@ pub mod error;
 mod public_api;
 mod runtime;
 mod transport;
+pub mod utils;
 
 // Re-export the public API and core runtime types at the crate root.
 pub use error::PacomError;

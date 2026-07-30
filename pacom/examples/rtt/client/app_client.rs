@@ -11,6 +11,7 @@ impl RttClientApp {
         let runtime = PacomRuntime::new(RuntimeConfig {
             mqtt_config: None,
             manifest_path: Some(manifest_path),
+            authority: None,
         })
         .await?;
         println!("[CLIENT] PacomRuntime created.");
