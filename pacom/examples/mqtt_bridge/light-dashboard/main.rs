@@ -13,13 +13,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             env!("CARGO_MANIFEST_DIR")
         )
     });
+    let authority = std::env::var("UP_AUTHORITY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     println!("[DASHBOARD] Inizializzazione runtime (solo locale SOME/IP)...");
     let runtime = Arc::new(
         PacomRuntime::new(RuntimeConfig {
             mqtt_config: None,
             manifest_path: Some(manifest_path),
-            authority: None,
+            authority,
         })
         .await?,
     );
@@ -72,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cmd_str
             );
             match runtime
-                .invoke_method(RPC_SET_LIGHTS, cmd_str.as_bytes().to_vec())
+                .invoke_rpc_method(RPC_SET_LIGHTS, cmd_str.as_bytes().to_vec())
                 .await
             {
                 Ok(resp) => {

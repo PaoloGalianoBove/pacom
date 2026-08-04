@@ -20,13 +20,7 @@ const DEFAULT_RPC_RELIABLE_PORT: u16 = 30508;
 const DEFAULT_DISCOVERY_UNRELIABLE_PORT: u16 = 30510;
 const DEFAULT_TOPIC_PUBLISH_UNRELIABLE_PORT: u16 = 30511;
 
-fn discovery_channel_count() -> u16 {
-    std::env::var("PACOM_DISCOVERY_CHANNELS")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .filter(|v| *v > 0 && *v <= 64)
-        .unwrap_or(16)
-}
+use crate::utils::{discovery_channel_count, env_flag_enabled, env_string_non_empty};
 
 fn discovery_service_id_for(ue_id: u16) -> u16 {
     0x0F00u16 + (ue_id % discovery_channel_count())
@@ -49,27 +43,6 @@ fn normalize_service_port_from_env(var: &str, default: u16) -> u16 {
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(default)
-}
-
-fn env_flag_enabled(var: &str, default: bool) -> bool {
-    std::env::var(var)
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !(v == "0" || v == "false" || v == "no" || v == "off")
-        })
-        .unwrap_or(default)
-}
-
-fn env_string_non_empty(var: &str) -> Option<String> {
-    std::env::var(var)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-fn env_string_non_empty_compat(primary: &str, legacy: &str) -> Option<String> {
-    env_string_non_empty(primary).or_else(|| env_string_non_empty(legacy))
 }
 
 fn cleanup_temp_vsomeip_configs() {
@@ -101,7 +74,9 @@ fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String
     let rpc_tcp_only = env_flag_enabled("PACOM_VSOMEIP_RPC_TCP_ONLY", true);
     let expose_topic_publish_service =
         env_flag_enabled("PACOM_VSOMEIP_EXPOSE_TOPIC_PUBLISH_SERVICE", true);
-    let self_routing_enabled = env_flag_enabled("PACOM_VSOMEIP_SELF_ROUTING", true);
+    // Self-routing is always enabled: every app registers itself in the vSomeIP
+    // applications array so the routing manager can identify it correctly.
+    let self_routing_enabled = true;
     let logging_level_override = env_string_non_empty("PACOM_VSOMEIP_LOG_LEVEL");
 
     if !auto_fix_enabled {
@@ -151,10 +126,8 @@ fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String
     })?;
 
     if self_routing_enabled {
-        let app_name = env_string_non_empty_compat("PACOM_APP_NAME", "APP_NAME")
-            .unwrap_or_else(|| format!("app-0x{:04x}", ue_id));
-        let app_id_hex = env_string_non_empty_compat("PACOM_APP_ID_HEX", "APP_ID_HEX")
-            .unwrap_or_else(|| normalize_hex_u16(ue_id));
+        let app_name = format!("app-0x{:04x}", ue_id);
+        let app_id_hex = normalize_hex_u16(ue_id);
 
         root.insert(
             "applications".to_string(),
@@ -299,8 +272,9 @@ fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String
             ],
             "eventgroups": [
                 {
-                    "eventgroup": "0x0001",
-                    "events": ["0x8f01"]
+                    "eventgroup": "0x8f01",
+                    "events": ["0x8f01"],
+                    "is_reliable": "false"
                 }
             ]
         }));
@@ -495,11 +469,13 @@ pub async fn setup_vsomeip_transport(
 
     // 4. Construct the configuration dynamically using serde_json to avoid hardcoded string templates
     let config_path = format!("/tmp/vsomeip-{}.json", app_name);
+    let default_log_level = std::env::var("PACOM_VSOMEIP_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
+
     let config_value = if is_router {
         serde_json::json!({
             "unicast": ecu_ip,
             "logging": {
-                "level": "warning",
+                "level": default_log_level,
                 "console": "true"
             },
             "applications": [
@@ -524,7 +500,7 @@ pub async fn setup_vsomeip_transport(
         serde_json::json!({
             "unicast": ecu_ip,
             "logging": {
-                "level": "warning",
+                "level": default_log_level,
                 "console": "true"
             },
             "applications": [
@@ -787,23 +763,11 @@ fn try_acquire_router_lock() -> bool {
 }
 
 fn lock_stale_timeout() -> Duration {
-    let stale_ms = std::env::var("PACOM_VSOMEIP_LOCK_STALE_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_LOCK_STALE_MS);
-    let d = Duration::from_millis(stale_ms);
-    dbg_log(format!("lock_stale_timeout={}ms", d.as_millis()));
-    d
+    Duration::from_millis(DEFAULT_LOCK_STALE_MS)
 }
 
 fn election_wait_timeout() -> Duration {
-    let wait_ms = std::env::var("PACOM_VSOMEIP_ELECTION_WAIT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_ELECTION_WAIT_MS);
-    let d = Duration::from_millis(wait_ms);
-    dbg_log(format!("election_wait_timeout={}ms", d.as_millis()));
-    d
+    Duration::from_millis(DEFAULT_ELECTION_WAIT_MS)
 }
 
 fn lock_is_stale(path: &str, stale_after: Duration) -> bool {

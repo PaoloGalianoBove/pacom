@@ -6,6 +6,7 @@ pub mod error;
 mod public_api;
 mod runtime;
 mod transport;
+/// Internal environment and debug helpers shared across runtime and transport code.
 pub mod utils;
 
 // Re-export the public API and core runtime types at the crate root.

@@ -39,22 +39,6 @@ impl PacomRouter {
         }
     }
 
-    /// Returns true if the given target authority matches the configured cloud authority
-    /// or if vSomeIP transport is unavailable on this node.
-    pub fn is_cloud_authority(&self, target_authority: &str) -> bool {
-        if target_authority.is_empty() || target_authority == "*" {
-            return false;
-        }
-        if self.vsomeip.is_none() {
-            return true;
-        }
-        if let Ok(cloud_auth) = crate::runtime::engine::cloud_authority_name() {
-            target_authority == cloud_auth
-        } else {
-            false
-        }
-    }
-
     /// Returns true if a message targeting `uri` must be routed via the cross-domain
     /// transport (MQTT) rather than the local intra-vehicle transport (vSomeIP).
     ///

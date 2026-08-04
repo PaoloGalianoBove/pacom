@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let topic_name = format!("/topic/sensor_{}", i);
         let counter = received_count.clone();
         
-        runtime.subscribe(&topic_name, move |_payload| {
+        runtime.subscribe_event(&topic_name, move |_payload| {
             counter.fetch_add(1, Ordering::Relaxed);
         }).await?;
     }

@@ -33,8 +33,10 @@ pub struct ManifestConfig {
     /// Topics published and subscribed to by the application.
     pub topics: TopicManifest,
     #[serde(skip)]
+    /// Resolved numeric method IDs for RPCs declared in `rpc.provide`.
     pub resolved_rpc_ids: HashMap<String, u16>,
     #[serde(skip)]
+    /// Resolved numeric resource IDs for topics declared in `topics.publish`.
     pub resolved_topic_ids: HashMap<String, u16>,
 }
 
@@ -76,6 +78,10 @@ impl ManifestConfig {
 
     // ── ID Resolution ──────────────────────────────────────────
 
+    /// Resolves and stores deterministic IDs for locally provided RPCs and published topics.
+    ///
+    /// When two names hash to the same value inside the same semispazio, PACOM
+    /// increments the candidate ID until it finds a free slot.
     pub fn resolve_and_store_ids(&mut self) {
         let mut rpc_used = HashSet::new();
         for name in &self.rpc.provide {

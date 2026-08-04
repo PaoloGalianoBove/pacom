@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for i in 0..400 {
             let topic_name = format!("/topic/sensor_{}", i);
             let payload = format!("Message {} for {}", iter, topic_name).into_bytes();
-            let _ = runtime.publish(&topic_name, payload).await;
+            let _ = runtime.publish_event(&topic_name, payload).await;
         }
     }
 

@@ -9,7 +9,7 @@ Esempio completo con tre app:
 
 - Dashboard -> Switch: RPC su `/rpc/lights/set`
 - Switch -> Dashboard: topic `/status/lights`
-- Cloud app -> Switch: topic `/cloud/command` con authority target `ecu-switch`
+- Cloud app -> Switch: topic `/cloud/command` instradato sul dominio cloud tramite l'authority configurata in `PACOM_CLOUD_AUTHORITY`
 - Switch -> Cloud app: topic `/cloud/telemetry`
 
 ## Note operative importanti

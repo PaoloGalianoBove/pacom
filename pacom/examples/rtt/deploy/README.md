@@ -30,7 +30,7 @@ You do not need to provide static `vsomeip.json` files anymore.
 # Create network (if not exists)
 docker network create pacom-net
 
-# Build image
+# Build image from the workspace root, where the Dockerfile is located
 docker build -t pacom-demo:latest -f Dockerfile .
 ```
 

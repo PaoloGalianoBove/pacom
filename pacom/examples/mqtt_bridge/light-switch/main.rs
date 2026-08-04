@@ -15,6 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             env!("CARGO_MANIFEST_DIR")
         )
     });
+    let authority = std::env::var("UP_AUTHORITY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     let broker_uri = std::env::var("PACOM_MQTT_BROKER_URI")
         .unwrap_or_else(|_| "mqtt://127.0.0.1:1883".to_string());
@@ -31,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             client_id: "light-switch-core".to_string(),
         }),
         manifest_path: Some(manifest_path.clone()),
-        authority: None,
+        authority: authority.clone(),
     })
     .await
     {
@@ -46,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rt = PacomRuntime::new(RuntimeConfig {
                 mqtt_config: None,
                 manifest_path: Some(manifest_path),
-                authority: None,
+                authority,
             })
             .await?;
             Arc::new(rt)

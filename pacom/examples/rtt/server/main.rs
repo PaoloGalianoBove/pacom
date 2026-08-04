@@ -12,11 +12,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             env!("CARGO_MANIFEST_DIR")
         )
     });
+    let authority = std::env::var("UP_AUTHORITY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
 
     let client = PacomRuntime::new(RuntimeConfig {
         mqtt_config: None,
         manifest_path: Some(manifest_path),
-        authority: None,
+        authority,
     })
     .await?;
 

@@ -42,10 +42,6 @@ name = "cloud_app"
 path = "examples/mqtt_bridge/cloud-app/main.rs"
 
 [[example]]
-name = "birthday_paradox"
-path = "examples/birthday_paradox/main.rs"
-
-[[example]]
 name = "birthday_paradox_pub"
 path = "examples/birthday_paradox/publisher/main.rs"
 
