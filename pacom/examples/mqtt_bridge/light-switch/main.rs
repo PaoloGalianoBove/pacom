@@ -81,17 +81,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Sottoscrizione comandi Cloud (MQTT)
     let runtime_clone = runtime.clone();
     let cloud_sub_result = runtime.subscribe_event(TOPIC_CLOUD_COMMAND, move |payload| {
+            let runtime_clone = runtime_clone.clone();
+            async move {
             let cmd = String::from_utf8_lossy(&payload).into_owned();
             println!("[CLOUD ➔ MQTT] Ricevuto comando dal Cloud: '{}'", cmd);
             println!("[CLOUD ➔ MQTT] Comando Cloud '{}' applicato con successo.", cmd);
 
             let rt = runtime_clone.clone();
-            tokio::spawn(async move {
-                let _ = rt.publish_event(TOPIC_STATUS, cmd.as_bytes().to_vec()).await;
-                let _ = rt
-                    .publish_event(TOPIC_CLOUD_TELEMETRY, cmd.as_bytes().to_vec())
-                    .await;
-            });
+            let _ = rt.publish_event(TOPIC_STATUS, cmd.clone().as_bytes().to_vec()).await;
+            let _ = rt
+                .publish_event(TOPIC_CLOUD_TELEMETRY, cmd.clone().as_bytes().to_vec())
+                .await;
+            }
         })
         .await;
 

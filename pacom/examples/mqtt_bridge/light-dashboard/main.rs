@@ -34,6 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_status_clone = current_status.clone();
     runtime
         .subscribe_event(TOPIC_STATUS, move |payload| {
+            let current_status_clone = current_status_clone.clone();
+            async move {
             let status = String::from_utf8_lossy(&payload).into_owned();
             if let Ok(mut lock) = current_status_clone.write() {
                 *lock = status.clone();
@@ -43,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 status
             );
             print_menu(&status);
+            }
         })
         .await?;
     println!("[DASHBOARD] Subscribe stato locale abilitata.");

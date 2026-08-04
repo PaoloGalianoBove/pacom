@@ -32,7 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let counter = received_count.clone();
         
         runtime.subscribe_event(&topic_name, move |_payload| {
-            counter.fetch_add(1, Ordering::Relaxed);
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         }).await?;
     }
 

@@ -37,9 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Sottoscrizione alla telemetria cloud del veicolo.
     runtime
         .subscribe_event(TOPIC_CLOUD_TELEMETRY, |payload| {
+            async move {
             let status = String::from_utf8_lossy(&payload);
             println!("\n[CLOUD - TELEMETRIA] Stato luci veicolo: {}", status);
             print_menu();
+            }
         })
         .await?;
 

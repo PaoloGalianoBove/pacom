@@ -1,5 +1,6 @@
 use crate::error::PacomError;
 use crate::runtime::engine::RuntimeEngine;
+use std::future::Future;
 
 /// High-level API that application code should consume.
 ///
@@ -53,13 +54,14 @@ impl PacomRuntime {
     ///
     /// The provided callback will be invoked whenever an event is received on the topic.
     /// The topic must be declared in the `topics.subscribe` section of the manifest.
-    pub async fn subscribe_event<F>(
+    pub async fn subscribe_event<F, Fut>(
         &self,
         logical_topic: &str,
         callback: F,
     ) -> Result<(), PacomError>
     where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
+        F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         self.inner.subscribe(logical_topic, callback).await
     }

@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -381,14 +383,9 @@ impl RuntimeEngine {
         };
         manifest.validate_no_collisions()?;
 
-        // 1. Resolve authority/ECU name and application UE_ID dynamically from config or environment
-        let authority = config
-            .authority
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| resolve_authority());
-        let ue_id = resolve_ue_id();
+        // 1. Resolve authority/ECU name and application UE_ID explicitly.
+        let authority = resolve_authority(config.authority.as_deref())?;
+        let ue_id = resolve_ue_id()?;
         dbg_log("Runtime",format!(
             "RuntimeEngine::new authority='{}' ue_id=0x{:04x} mqtt_enabled={} manifest_path={:?}",
             authority,
@@ -700,9 +697,10 @@ impl RuntimeEngine {
     /// Non-blocking: the callback is registered immediately and will be activated
     /// either now (if the publisher was already discovered) or reactively as soon as
     /// the publisher announces itself via the discovery mechanism.
-    pub async fn subscribe<F>(&self, topic_name: &str, callback: F) -> Result<(), PacomError>
+    pub async fn subscribe<F, Fut>(&self, topic_name: &str, callback: F) -> Result<(), PacomError>
     where
-        F: Fn(Vec<u8>) + Send + Sync + 'static,
+        F: Fn(Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         if !self.manifest.is_topic_subscribed(topic_name) {
             return Err(PacomError::ManifestViolation {
@@ -718,7 +716,7 @@ impl RuntimeEngine {
         
         let listener: Arc<dyn UListener> = Arc::new(ClosureListener {
             expected_resource_id: expected_resource_id.clone(),
-            callback: Box::new(callback),
+            callback: Box::new(move |payload| Box::pin(callback(payload))),
         });
 
         if is_cloud_topic(topic_name) {
@@ -1104,58 +1102,55 @@ async fn send_discovery_event(
 }
 
 /// Resolve the node/ECU authority name from environment.
-fn resolve_authority() -> String {
-    if let Ok(authority) = std::env::var("UP_AUTHORITY") {
-        if !authority.trim().is_empty() {
-            return authority;
+fn resolve_authority(explicit_authority: Option<&str>) -> Result<String, PacomError> {
+    if let Some(authority) = explicit_authority {
+        let trimmed = authority.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
         }
     }
 
-    if let Ok(hostname) = std::env::var("HOSTNAME") {
-        if !hostname.trim().is_empty() {
-            return hostname;
-        }
-    }
-
-    "local_ecu".to_string()
+    std::env::var("UP_AUTHORITY")
+        .ok()
+        .map(|authority| authority.trim().to_string())
+        .filter(|authority| !authority.is_empty())
+        .ok_or_else(|| {
+            PacomError::Config("UP_AUTHORITY must be set or provided explicitly in RuntimeConfig.authority".to_string())
+        })
 }
 
 /// Resolve the application UE identifier from environment,
-/// or derive a stable default from the executable name.
-fn resolve_ue_id() -> u16 {
-    std::env::var("UP_UE_ID")
-        .ok()
-        .and_then(|val| {
-            if val.starts_with("0x") {
-                u16::from_str_radix(&val[2..], 16).ok()
-            } else {
-                val.parse::<u16>().ok()
-            }
-        })
-        .unwrap_or_else(|| {
-            // Determine a deterministic ID based on the current executable's name
-            let exe_name = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "default_app".to_string());
+/// and fail if it is missing or invalid.
+fn resolve_ue_id() -> Result<u16, PacomError> {
+    let raw = std::env::var("UP_UE_ID").map_err(|_| {
+        PacomError::Config("UP_UE_ID must be set in the environment".to_string())
+    })?;
 
-            // FNV-1a hashing to convert the string to a u16
-            let mut hash = 0x811c9dc5u32;
-            for byte in exe_name.bytes() {
-                hash ^= byte as u32;
-                hash = hash.wrapping_mul(0x01000193);
-            }
-            let val = (hash ^ (hash >> 16)) as u16;
+    let parsed = if raw.starts_with("0x") {
+        u16::from_str_radix(&raw[2..], 16)
+    } else {
+        raw.parse::<u16>()
+    }
+    .map_err(|_| PacomError::Config(format!("Invalid UP_UE_ID value: '{raw}'")))?;
 
-            // Restrict to user-application ID range (>= 0x1000) to avoid system conflicts
-            if val < 0x1000 { val + 0x1000 } else { val }
-        })
+    validate_ue_id(parsed)?;
+    Ok(parsed)
+}
+
+fn validate_ue_id(ue_id: u16) -> Result<(), PacomError> {
+    if ue_id < 0x1000 {
+        return Err(PacomError::Config(format!(
+            "UP_UE_ID 0x{ue_id:04X} is not allowed: use a user-space ID >= 0x1000"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Internal adapter from uProtocol listener callbacks to byte closures.
 struct ClosureListener {
     expected_resource_id: Arc<std::sync::atomic::AtomicU16>,
-    callback: Box<dyn Fn(Vec<u8>) + Send + Sync + 'static>,
+    callback: Box<dyn Fn(Vec<u8>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static>,
 }
 
 #[async_trait]
@@ -1207,7 +1202,7 @@ impl UListener for ClosureListener {
                 expected,
                 payload.len()
             ));
-            (self.callback)(payload.to_vec());
+            (self.callback)(payload.to_vec()).await;
         } else {
             dbg_log("Runtime","ClosureListener: message has no payload");
         }
