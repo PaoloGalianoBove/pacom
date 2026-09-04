@@ -107,7 +107,6 @@ struct DiscoveryEvent {
 struct PendingSubscription {
     listener: Arc<dyn UListener>,
     expected_resource_id: Option<Arc<std::sync::atomic::AtomicU16>>,
-    source_authority: Option<String>,
 }
 
 struct DiscoveryListener {
@@ -156,15 +155,21 @@ impl UListener for DiscoveryListener {
                     event.provider_authority
                 ));
 
-                let effective_authority = if event.provider_authority.is_empty() {
-                    source_authority.clone()
-                } else {
-                    event.provider_authority.clone()
-                };
+                let provider_authority = event.provider_authority.trim();
+                if provider_authority.is_empty() {
+                    dbg_log(
+                        "Runtime",
+                        format!(
+                            "Discovery event rejected: empty provider_authority kind='{}' name='{}' source_authority='{}'",
+                            event.kind, event.name, source_authority
+                        ),
+                    );
+                    return;
+                }
 
                 let provider = ProviderInfo {
                     ue_id: event.provider_ue_id,
-                    authority: effective_authority.clone(),
+                    authority: provider_authority.to_string(),
                     major_version: event.major_version,
                     resource_id: event.resource_id,
                 };
@@ -225,18 +230,9 @@ impl UListener for DiscoveryListener {
                                 event.name,
                                 subs.len()
                             ));
-                            let mut still_pending: Vec<PendingSubscription> = Vec::new();
-
                             for sub in subs {
-                                if let Some(ref wanted_authority) = sub.source_authority {
-                                    if wanted_authority != &effective_authority {
-                                        still_pending.push(sub);
-                                        continue;
-                                    }
-                                }
-
                                 if let Ok(uri) = UUri::try_from_parts(
-                                    &effective_authority,
+                                    provider_authority,
                                     provider.ue_id as u32,
                                     event.major_version,
                                     event.resource_id,
@@ -277,19 +273,11 @@ impl UListener for DiscoveryListener {
                                     dbg_log("Runtime",format!(
                                         "Pending subscription skipped: invalid URI build topic='{}' effective_authority='{}' ue=0x{:04X} major={} resource=0x{:04X}",
                                         event.name,
-                                        effective_authority,
+                                        provider_authority,
                                         provider.ue_id,
                                         event.major_version,
                                         event.resource_id
                                     ));
-                                }
-                            }
-
-                            if !still_pending.is_empty() {
-                                if let Ok(mut map) = self.pending_subs.lock() {
-                                    map.entry(event.name.clone())
-                                        .or_default()
-                                        .extend(still_pending);
                                 }
                             }
                         } else {
@@ -347,12 +335,14 @@ pub struct RuntimeConfig {
 /// and fully encapsulates the lower-level communication abstractions.
 pub struct RuntimeEngine {
     router: Arc<PacomRouter>,
-    rpc_client: Arc<InMemoryRpcClient>,
-    rpc_server: Arc<InMemoryRpcServer>,
+    rpc_client: Option<Arc<InMemoryRpcClient>>,
+    rpc_server: Option<Arc<InMemoryRpcServer>>,
     discovery_cache: Arc<RwLock<DiscoveryCache>>,
     provided_capabilities: Arc<RwLock<ProvidedCapabilities>>,
     manifest: ManifestConfig,
     local_ue_id: u16,
+    /// Topics already subscribed by this runtime instance (idempotent subscribe guard).
+    active_topic_subscriptions: Arc<Mutex<HashSet<String>>>,
     /// Pending subscriptions that will be activated as soon as the publisher announces itself.
     pending_subscriptions: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -426,15 +416,28 @@ impl RuntimeEngine {
             mqtt_transport,
         ));
 
-        // 5. Initialize RPC client/server components over the selected router
-        let rpc_client = Arc::new(
-            InMemoryRpcClient::new(router.clone(), router.clone())
-                .await
-                .map_err(|e| {
-                    PacomError::Config(format!("Failed to initialize InMemoryRpcClient: {e:?}"))
-                })?,
-        );
-        let rpc_server = Arc::new(InMemoryRpcServer::new(router.clone(), router.clone()));
+        // 5. Initialize RPC client/server components only when declared in manifest
+        let rpc_client = if !manifest.rpc.consume.is_empty() {
+            Some(Arc::new(
+                InMemoryRpcClient::new(router.clone(), router.clone())
+                    .await
+                    .map_err(|e| {
+                        PacomError::Config(format!(
+                            "Failed to initialize InMemoryRpcClient: {e:?}"
+                        ))
+                    })?,
+            ))
+        } else {
+            None
+        };
+        let rpc_server = if !manifest.rpc.provide.is_empty() {
+            Some(Arc::new(InMemoryRpcServer::new(
+                router.clone(),
+                router.clone(),
+            )))
+        } else {
+            None
+        };
 
         let discovery_cache = Arc::new(RwLock::new(DiscoveryCache::default()));
         let provided_capabilities = Arc::new(RwLock::new(ProvidedCapabilities {
@@ -450,6 +453,8 @@ impl RuntimeEngine {
 
         let pending_subscriptions: Arc<Mutex<HashMap<String, Vec<PendingSubscription>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let active_topic_subscriptions: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
 
         // Register vSomeIP discovery channels whenever this node has vSomeIP enabled
         // and actually needs to discover remote peers (has subscriptions or consumed RPCs).
@@ -515,10 +520,37 @@ impl RuntimeEngine {
             provided_capabilities,
             manifest,
             local_ue_id: ue_id,
+            active_topic_subscriptions,
             pending_subscriptions,
             shutdown_tx,
             discovery_task,
         })
+    }
+
+    fn try_mark_active_subscription(&self, topic_name: &str) -> bool {
+        if let Ok(mut set) = self.active_topic_subscriptions.lock() {
+            if set.contains(topic_name) {
+                true
+            } else {
+                set.insert(topic_name.to_string());
+                false
+            }
+        } else {
+            dbg_log(
+                "Runtime",
+                format!(
+                    "subscribe: active topic set lock poisoned, proceeding non-idempotent topic='{}'",
+                    topic_name
+                ),
+            );
+            false
+        }
+    }
+
+    fn unmark_active_subscription(&self, topic_name: &str) {
+        if let Ok(mut set) = self.active_topic_subscriptions.lock() {
+            set.remove(topic_name);
+        }
     }
 
     pub async fn shutdown(&self) -> Result<(), PacomError> {
@@ -709,98 +741,124 @@ impl RuntimeEngine {
             });
         }
 
-        let resource_id = self.manifest.resource_id_for(topic_name);
-        let expected_resource_id = Arc::new(std::sync::atomic::AtomicU16::new(
-            if is_cloud_topic(topic_name) { resource_id } else { 0 }
-        ));
-        
-        let listener: Arc<dyn UListener> = Arc::new(ClosureListener {
-            expected_resource_id: expected_resource_id.clone(),
-            callback: Box::new(move |payload| Box::pin(callback(payload))),
-        });
-
-        if is_cloud_topic(topic_name) {
-            let cloud_authority = cloud_authority_name()?;
-            let source_filter = cloud_wildcard_source_uri(resource_id)?;
-            let sink_filter = cloud_sink_marker_uri(&cloud_authority)?;
-
-            dbg_log("Runtime",format!(
-                "subscribe topic='{}' resolved as cloud listener source='{}' sink='{}'",
-                topic_name,
-                source_filter.to_uri(false),
-                sink_filter.to_uri(false)
-            ));
-
-            self.router
-                .register_listener(&source_filter, Some(&sink_filter), listener)
-                .await?;
+        if self.try_mark_active_subscription(topic_name) {
+            dbg_log(
+                "Runtime",
+                format!(
+                    "subscribe idempotent no-op: topic='{}' already subscribed for this runtime instance",
+                    topic_name
+                ),
+            );
             return Ok(());
         }
 
-        dbg_log("Runtime",format!(
-            "subscribe topic='{}' resource_id=0x{:04X}",
-            topic_name,
-            resource_id
-        ));
+        let result: Result<(), PacomError> = async {
+            let resource_id = self.manifest.resource_id_for(topic_name);
+            let expected_resource_id = Arc::new(std::sync::atomic::AtomicU16::new(
+                if is_cloud_topic(topic_name) {
+                    resource_id
+                } else {
+                    0
+                },
+            ));
 
-        // Check if we already know who publishes this topic from a prior discovery event.
-        let maybe_info = self
-            .discovery_cache
-            .read()
-            .ok()
-            .and_then(|c| c.topic_publishers.get(topic_name).cloned());
+            let listener: Arc<dyn UListener> = Arc::new(ClosureListener {
+                expected_resource_id: expected_resource_id.clone(),
+                callback: Box::new(move |payload| Box::pin(callback(payload))),
+            });
 
-        if let Some(info) = maybe_info {
-            // Publisher already known: register immediately.
-            let uri = UUri::try_from_parts(
-                &info.authority,
-                info.ue_id as u32,
-                info.major_version,
-                info.resource_id,
-            )
-            .map_err(|e| PacomError::Config(format!("Invalid subscribe topic URI: {e:?}")))?;
-            dbg_log("Runtime",format!(
-                "subscribe: provider already known topic='{}' register_listener uri='{}'",
-                topic_name,
-                uri.to_uri(false)
-            ));
-            dbg_log("Runtime",format!(
-                "subscribe immediate topic='{}' using provider authority='{}' ue=0x{:04x} uri='{}'",
-                topic_name,
-                info.authority,
-                info.ue_id,
-                uri.to_uri(false)
-            ));
-            dbg_log("Runtime",format!(
-                "subscribe immediate provider={}",
-                provider_dbg(&info)
-            ));
-            self.router.register_listener(&uri, None, listener).await?;
-        } else {
-            // Publisher not yet known: enqueue as pending.
-            dbg_log("Runtime",format!(
-                "subscribe: provider not yet known topic='{}' enqueue pending",
-                topic_name
-            ));
-            // DiscoveryListener will trigger the registration when the publisher announces.
-            if let Ok(mut map) = self.pending_subscriptions.lock() {
-                map.entry(topic_name.to_string())
-                    .or_default()
-                    .push(PendingSubscription {
-                        listener,
-                        expected_resource_id: Some(expected_resource_id),
-                        source_authority: None,
-                    });
-                dbg_log("Runtime",format!("subscribe pending topic='{}'", topic_name));
-                let total_pending = map.values().map(|v| v.len()).sum::<usize>();
+            if is_cloud_topic(topic_name) {
+                let cloud_authority = cloud_authority_name()?;
+                let source_filter = cloud_wildcard_source_uri(resource_id)?;
+                let sink_filter = cloud_sink_marker_uri(&cloud_authority)?;
+
                 dbg_log("Runtime",format!(
-                    "subscribe pending stats: pending_topics={} total_pending_subscriptions={}",
-                    map.len(),
-                    total_pending
+                    "subscribe topic='{}' resolved as cloud listener source='{}' sink='{}'",
+                    topic_name,
+                    source_filter.to_uri(false),
+                    sink_filter.to_uri(false)
                 ));
+
+                self.router
+                    .register_listener(&source_filter, Some(&sink_filter), listener)
+                    .await?;
+                return Ok(());
             }
+
+            dbg_log("Runtime",format!(
+                "subscribe topic='{}' resource_id=0x{:04X}",
+                topic_name,
+                resource_id
+            ));
+
+            // Check if we already know who publishes this topic from a prior discovery event.
+            let maybe_info = self
+                .discovery_cache
+                .read()
+                .ok()
+                .and_then(|c| c.topic_publishers.get(topic_name).cloned());
+
+            if let Some(info) = maybe_info {
+                // Publisher already known: register immediately.
+                let uri = UUri::try_from_parts(
+                    &info.authority,
+                    info.ue_id as u32,
+                    info.major_version,
+                    info.resource_id,
+                )
+                .map_err(|e| PacomError::Config(format!("Invalid subscribe topic URI: {e:?}")))?;
+                dbg_log("Runtime",format!(
+                    "subscribe: provider already known topic='{}' register_listener uri='{}'",
+                    topic_name,
+                    uri.to_uri(false)
+                ));
+                dbg_log("Runtime",format!(
+                    "subscribe immediate topic='{}' using provider authority='{}' ue=0x{:04x} uri='{}'",
+                    topic_name,
+                    info.authority,
+                    info.ue_id,
+                    uri.to_uri(false)
+                ));
+                dbg_log("Runtime",format!(
+                    "subscribe immediate provider={}",
+                    provider_dbg(&info)
+                ));
+                self.router.register_listener(&uri, None, listener).await?;
+            } else {
+                // Publisher not yet known: enqueue as pending.
+                dbg_log("Runtime",format!(
+                    "subscribe: provider not yet known topic='{}' enqueue pending",
+                    topic_name
+                ));
+                // DiscoveryListener will trigger the registration when the publisher announces.
+                if let Ok(mut map) = self.pending_subscriptions.lock() {
+                    map.entry(topic_name.to_string())
+                        .or_default()
+                        .push(PendingSubscription {
+                            listener,
+                            expected_resource_id: Some(expected_resource_id),
+                        });
+                    dbg_log("Runtime",format!("subscribe pending topic='{}'", topic_name));
+                    let total_pending = map.values().map(|v| v.len()).sum::<usize>();
+                    dbg_log("Runtime",format!(
+                        "subscribe pending stats: pending_topics={} total_pending_subscriptions={}",
+                        map.len(),
+                        total_pending
+                    ));
+                } else {
+                    return Err(PacomError::Config(
+                        "Failed to enqueue pending subscription: lock poisoned".to_string(),
+                    ));
+                }
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+
+        if result.is_err() {
+            self.unmark_active_subscription(topic_name);
+        }
+        result
     }
 
     /// Invokes an RPC method identified by a logical service name.
@@ -829,8 +887,11 @@ impl RuntimeEngine {
         let payload_obj = UPayload::new(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW);
         let call_options = CallOptions::for_rpc_request(rpc_timeout_ms(), None, None, None);
 
-        let response = self
-            .rpc_client
+        let rpc_client = self.rpc_client.as_ref().ok_or_else(|| {
+            PacomError::Config("RPC client is not initialized for this runtime instance".to_string())
+        })?;
+
+        let response = rpc_client
             .invoke_method(method_uri, call_options, Some(payload_obj))
             .await
             .map_err(|e| PacomError::RpcError(format!("RPC invocation failed: {e:?}")))?;
@@ -861,7 +922,11 @@ impl RuntimeEngine {
         let method_id = self.manifest.method_id_for(service_name);
 
         let wrapper = Arc::new(ClosureHandler { handler });
-        self.rpc_server
+        let rpc_server = self.rpc_server.as_ref().ok_or_else(|| {
+            PacomError::Config("RPC server is not initialized for this runtime instance".to_string())
+        })?;
+
+        rpc_server
             .register_endpoint(None, method_id, wrapper)
             .await
             .map_err(|e| PacomError::Config(format!("Failed to register RPC: {e:?}")))?;
@@ -889,8 +954,8 @@ impl RuntimeEngine {
             return Ok(info);
         }
 
-        let timeout = discovery_wait_timeout();
-        let poll = discovery_poll_interval();
+        let timeout = rpc_provider_discovery_timeout();
+        let poll = rpc_provider_discovery_poll_interval();
         let deadline = Instant::now() + timeout;
         let mut attempts: u64 = 0;
         dbg_log("Runtime",format!(
@@ -939,7 +1004,9 @@ impl RuntimeEngine {
     }
 }
 
-fn discovery_wait_timeout() -> Duration {
+
+// Time I wait when trying to discover a remote RPC provider before giving up.
+fn rpc_provider_discovery_timeout() -> Duration {
     std::env::var("PACOM_DISCOVERY_MAX_WAIT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -947,6 +1014,7 @@ fn discovery_wait_timeout() -> Duration {
         .unwrap_or(Duration::from_millis(180_000))
 }
 
+//Time I wait for an RPC response before giving up when I know the provider.
 fn rpc_timeout_ms() -> u32 {
     std::env::var("PACOM_RPC_TIMEOUT_MS")
         .ok()
@@ -954,6 +1022,7 @@ fn rpc_timeout_ms() -> u32 {
         .unwrap_or(5_000)
 }
 
+// Number of discovery channels to register for vSomeIP discovery events.
 fn discovery_channel_count() -> u16 {
     std::env::var("PACOM_DISCOVERY_CHANNELS")
         .ok()
@@ -962,7 +1031,8 @@ fn discovery_channel_count() -> u16 {
         .unwrap_or(16)
 }
 
-fn discovery_poll_interval() -> Duration {
+//Time I wait between discovery polls when trying to discover a remote RPC provider.
+fn rpc_provider_discovery_poll_interval() -> Duration {
     std::env::var("PACOM_DISCOVERY_POLL_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -970,6 +1040,7 @@ fn discovery_poll_interval() -> Duration {
         .unwrap_or(Duration::from_millis(250))
 }
 
+// Time I wait between discovery reannounce ticks when I am a provider.
 fn discovery_reannounce_interval() -> Duration {
     std::env::var("PACOM_DISCOVERY_REANNOUNCE_SECS")
         .ok()

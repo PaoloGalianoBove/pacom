@@ -1,5 +1,8 @@
 # Modulo Runtime (`runtime/`)
 
+Per la descrizione completa del ciclo di vita e dei flussi interni dell'engine, vedere
+[`ENGINE.md`](ENGINE.md).
+
 Il modulo `runtime` contiene il comportamento operativo "nascosto" di PACOM: validazione del manifesto, traduzione degli indirizzi, meccanismi di Service Discovery, e orchestrazione dei trasporti.
 
 ## `engine.rs` (Il Cuore dell'Orchestrazione)
@@ -29,3 +32,10 @@ All'avvio, `RuntimeEngine`:
 1. Verifica se l'app consuma/legge dati (dalla configurazione del manifest).
 2. Se sì, fa un `register_listener` massivo sui **16 canali** di discovery per intercettare gli annunci di chiunque.
 3. Inoltre, lancia un task asincrono in background che ogni `PACOM_DISCOVERY_REANNOUNCE_SECS` riannuncia le capability offerte dall'app, in modo che eventuali listener avviati in ritardo possano allinearsi.
+
+## Limitazioni Attuali
+
+- PACOM assume che un nome logico di topic identifichi un solo publisher per dominio di discovery. Se due applicazioni annunciano lo stesso topic, la cache di discovery conserva un solo `ProviderInfo` per quel nome e l'ultimo annuncio può sovrascrivere il precedente.
+- Il `topic_publish_ue_id` è un identificatore interno di trasporto, non un namespace semantico per distinguere publisher diversi dello stesso topic.
+- Se serve distinguere più publisher, il topic deve essere qualificato a livello applicativo o tramite authority/namespace esplicito.
+- Con l'attuale integrazione locale tra PACOM e `up-transport-vsomeip`, RPC e topic locali non possono condividere in modo stabile lo stesso `UE ID` / service vSomeIP. Il path pub/sub del transport registra i topic tramite semantica eventgroup con `ANY_MAJOR`, mentre il path RPC usa major esplicita (`1` nei nostri esempi): sullo stesso service locale questo produce conflitti `255 vs 1` lato vSomeIP. Per questo PACOM mantiene oggi una separazione interna tra path RPC e path topic locali.

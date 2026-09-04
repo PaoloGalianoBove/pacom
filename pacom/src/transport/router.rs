@@ -6,8 +6,7 @@ use up_transport_mqtt5::Mqtt5Transport;
 use up_transport_vsomeip::UPTransportVsomeip;
 
 use crate::transport::vsomeip_topology::{
-    is_mqtt_wildcard_ue_id, is_wildcard_major_version, is_wildcard_resource_id,
-    normalize_uri_for_vsomeip,
+    is_mqtt_wildcard_ue_id, is_wildcard_resource_id, normalize_uri_for_vsomeip,
     VsomeipTopologyResolver,
 };
 
@@ -115,6 +114,244 @@ impl PacomRouter {
         ));
         decision
     }
+
+    async fn register_cloud_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UListener>,
+    ) -> Result<(), UStatus> {
+        let Some(mqtt_tx) = self.mqtt.as_ref() else {
+            info!("[Router] Cloud listener registration skipped: MQTT transport not configured");
+            return Err(UStatus::fail_with_code(
+                up_rust::UCode::UNAVAILABLE,
+                "MQTT transport not configured",
+            ));
+        };
+
+        let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF).unwrap();
+        let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
+        let mut retries = 50;
+        let mut attempt = 1;
+        loop {
+            match mqtt_tx
+                .register_listener(source_filter, effective_sink, listener.clone())
+                .await
+            {
+                Ok(_) => {
+                    dbg_log("Router",format!(
+                        "register_cloud_listener(): mqtt registration succeeded attempts={} source={} sink={}",
+                        attempt,
+                        uri_dbg(source_filter),
+                        effective_sink
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string())
+                    ));
+                    return Ok(());
+                }
+                Err(e)
+                    if e.code.enum_value_or_default() == up_rust::UCode::UNAVAILABLE
+                        && retries > 0 =>
+                {
+                    dbg_log("Router",format!(
+                        "register_cloud_listener(): mqtt unavailable retry attempt={} remaining={} source={} sink={} code={:?}",
+                        attempt,
+                        retries,
+                        uri_dbg(source_filter),
+                        effective_sink
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        e.code
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    retries -= 1;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    dbg_log("Router",format!(
+                        "register_cloud_listener(): mqtt registration failed attempt={} source={} sink={} code={:?} message={:?}",
+                        attempt,
+                        uri_dbg(source_filter),
+                        effective_sink
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        e.code,
+                        e.message
+                    ));
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    async fn register_local_vsomeip_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UListener>,
+    ) -> Result<(), UStatus> {
+        let Some(v) = self.vsomeip.as_ref() else {
+            return Err(UStatus::fail_with_code(
+                up_rust::UCode::UNAVAILABLE,
+                "No vSomeIP transport available",
+            ));
+        };
+
+        if let Some(sink) = sink_filter {
+            if sink.resource_id == 0 {
+                return v.register_listener(source_filter, sink_filter, listener).await;
+            }
+        }
+
+        let candidates = self.topology.local_listener_candidates(source_filter, sink_filter);
+        if candidates.is_empty() {
+            dbg_log("Router",format!(
+                "register_local_vsomeip_listener(): skipping catch-all source={} sink={}",
+                uri_dbg(source_filter),
+                sink_filter
+                    .map(uri_dbg)
+                    .unwrap_or_else(|| "<none>".to_string())
+            ));
+            return Ok(());
+        }
+
+        let mut last_err = None;
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            match v
+                .register_listener(&candidate, sink_filter, listener.clone())
+                .await
+            {
+                Ok(_) => {
+                    dbg_log("Router",format!(
+                        "register_local_vsomeip_listener(): success candidate_index={} filter={} sink={}",
+                        idx,
+                        uri_dbg(&candidate),
+                        sink_filter
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string())
+                    ));
+                    return Ok(());
+                }
+                Err(e) => {
+                    dbg_log("Router",format!(
+                        "register_local_vsomeip_listener(): candidate failed candidate_index={} filter={} sink={} code={:?} message={:?}",
+                        idx,
+                        uri_dbg(&candidate),
+                        sink_filter
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        e.code,
+                        e.message
+                    ));
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            UStatus::fail_with_code(
+                up_rust::UCode::UNAVAILABLE,
+                "No local vSomeIP listener candidate available",
+            )
+        }))
+    }
+
+    async fn unregister_cloud_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UListener>,
+    ) -> Result<(), UStatus> {
+        let Some(mqtt_tx) = self.mqtt.as_ref() else {
+            return Err(UStatus::fail_with_code(
+                up_rust::UCode::UNAVAILABLE,
+                "MQTT transport not configured",
+            ));
+        };
+
+        let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF).unwrap();
+        let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
+        mqtt_tx
+            .unregister_listener(source_filter, effective_sink, listener)
+            .await
+    }
+
+    async fn unregister_local_vsomeip_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UListener>,
+    ) -> Result<(), UStatus> {
+        let Some(v) = self.vsomeip.as_ref() else {
+            return Err(UStatus::fail_with_code(
+                up_rust::UCode::UNAVAILABLE,
+                "No vSomeIP transport available",
+            ));
+        };
+
+        if let Some(sink) = sink_filter {
+            if sink.resource_id == 0 {
+                return v.unregister_listener(source_filter, sink_filter, listener).await;
+            }
+        }
+
+        let candidates = self.topology.local_listener_candidates(source_filter, sink_filter);
+        if candidates.is_empty() {
+            dbg_log("Router",format!(
+                "unregister_local_vsomeip_listener(): skipping catch-all source={} sink={}",
+                uri_dbg(source_filter),
+                sink_filter
+                    .map(uri_dbg)
+                    .unwrap_or_else(|| "<none>".to_string())
+            ));
+            return Ok(());
+        }
+
+        let mut success = false;
+        let mut last_err = None;
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            match v
+                .unregister_listener(&candidate, sink_filter, listener.clone())
+                .await
+            {
+                Ok(_) => {
+                    success = true;
+                    dbg_log("Router",format!(
+                        "unregister_local_vsomeip_listener(): success candidate_index={} filter={} sink={}",
+                        idx,
+                        uri_dbg(&candidate),
+                        sink_filter
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string())
+                    ));
+                }
+                Err(e) => {
+                    dbg_log("Router",format!(
+                        "unregister_local_vsomeip_listener(): candidate failed candidate_index={} filter={} sink={} code={:?} message={:?}",
+                        idx,
+                        uri_dbg(&candidate),
+                        sink_filter
+                            .map(uri_dbg)
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        e.code,
+                        e.message
+                    ));
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        if success {
+            Ok(())
+        } else {
+            Err(last_err.unwrap_or_else(|| {
+                UStatus::fail_with_code(
+                    up_rust::UCode::UNAVAILABLE,
+                    "No local vSomeIP listener candidate available",
+                )
+            }))
+        }
+    }
 }
 
 #[async_trait]
@@ -171,11 +408,10 @@ impl UTransport for PacomRouter {
                 let mut vsomeip_msg = message;
                 if let Some(source) = vsomeip_msg.attributes.source.as_ref().cloned() {
                     dbg_log("Router",format!(
-                        "PUBLISH_PATH raw source={} major={} resource={} wildcard_major={} wildcard_resource={}",
+                        "PUBLISH_PATH raw source={} major={} resource={} wildcard_resource={}",
                         uri_dbg(&source),
                         source.ue_version_major,
                         source.resource_id,
-                        is_wildcard_major_version(source.ue_version_major),
                         is_wildcard_resource_id(source.resource_id)
                     ));
 
@@ -426,172 +662,12 @@ impl UTransport for PacomRouter {
         let is_cloud = self.listener_cloud_path(source_filter, sink_filter);
         dbg_log("Router",format!("register_listener(): cloud_path={}", is_cloud));
 
-        let mut success = false;
-        let mut last_err = None;
-
         if is_cloud {
-            if let Some(ref mqtt_tx) = self.mqtt {
-                let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF)
-                    .unwrap();
-                let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
-                let mut retries = 50;
-                let mut attempt = 1;
-                loop {
-                    match mqtt_tx
-                        .register_listener(source_filter, effective_sink, listener.clone())
-                        .await
-                    {
-                        Ok(_) => {
-                            success = true;
-                            dbg_log("Router",format!(
-                                "register_listener(): mqtt registration succeeded attempts={} source={} sink={}",
-                                attempt,
-                                uri_dbg(source_filter),
-                                effective_sink
-                                    .map(uri_dbg)
-                                    .unwrap_or_else(|| "<none>".to_string())
-                            ));
-                            break;
-                        }
-                        Err(e)
-                            if e.code.enum_value_or_default() == up_rust::UCode::UNAVAILABLE
-                                && retries > 0 =>
-                        {
-                            dbg_log("Router",format!(
-                                "register_listener(): mqtt unavailable retry attempt={} remaining={} source={} sink={} code={:?}",
-                                attempt,
-                                retries,
-                                uri_dbg(source_filter),
-                                effective_sink
-                                    .map(uri_dbg)
-                                    .unwrap_or_else(|| "<none>".to_string()),
-                                e.code
-                            ));
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            retries -= 1;
-                            attempt += 1;
-                        }
-                        Err(e) => {
-                            dbg_log("Router",format!(
-                                "register_listener(): mqtt registration failed attempt={} source={} sink={} code={:?} message={:?}",
-                                attempt,
-                                uri_dbg(source_filter),
-                                effective_sink
-                                    .map(uri_dbg)
-                                    .unwrap_or_else(|| "<none>".to_string()),
-                                e.code,
-                                e.message
-                            ));
-                            last_err = Some(e);
-                            break;
-                        }
-                    }
-                }
-            } else {
-                info!(
-                    "[Router] Cloud listener registration skipped: MQTT transport not configured"
-                );
-            }
-        }
-
-        // Register on local vSomeIP only for non-cloud filters.
-        if !is_cloud {
-            if let Some(ref v) = self.vsomeip {
-                if let Some(sink) = sink_filter {
-                    if sink.resource_id == 0 {
-                        match v
-                            .register_listener(source_filter, sink_filter, listener.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                dbg_log("Router",format!(
-                                    "register_listener(): vsomeip RPC response listener registered source={} sink={}",
-                                    uri_dbg(source_filter),
-                                    uri_dbg(sink)
-                                ));
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                dbg_log("Router",format!(
-                                    "register_listener(): vsomeip RPC response listener registration failed: {:?}",
-                                    e
-                                ));
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                let is_cloud_bound_sink = sink_filter.map(|s| self.is_cloud_bound(s)).unwrap_or(false);
-                let candidates = self.topology.expand_listener_candidates(source_filter, sink_filter, is_cloud_bound_sink);
-
-                if candidates.is_empty() {
-                    dbg_log("Router",format!(
-                        "register_listener(): skipping local vSomeIP catch-all source={} sink={}",
-                        uri_dbg(source_filter),
-                        sink_filter
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string())
-                    ));
-                    success = true;
-                } else {
-                    let candidate_list = candidates
-                        .iter()
-                        .map(uri_dbg)
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    dbg_log("Router",format!(
-                        "register_listener(): vsomeip candidates={}",
-                        candidate_list
-                    ));
-
-                    for (idx, candidate) in candidates.into_iter().enumerate() {
-                        match v
-                            .register_listener(&candidate, sink_filter, listener.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                success = true;
-                                dbg_log("Router",format!(
-                                    "register_listener(): vSomeIP listener registration succeeded candidate_index={} filter={} sink={}",
-                                    idx,
-                                    uri_dbg(&candidate),
-                                    sink_filter
-                                        .map(uri_dbg)
-                                        .unwrap_or_else(|| "<none>".to_string())
-                                ));
-                                break;
-                            }
-                            Err(e) => {
-                                dbg_log("Router",format!(
-                                    "register_listener(): vSomeIP candidate failed candidate_index={} filter={} sink={} code={:?} message={:?}",
-                                    idx,
-                                    uri_dbg(&candidate),
-                                    sink_filter
-                                        .map(uri_dbg)
-                                        .unwrap_or_else(|| "<none>".to_string()),
-                                    e.code,
-                                    e.message
-                                ));
-                                last_err = Some(e);
-                            }
-                        }
-                    }
-
-                    if !success {
-                        dbg_log("Router",
-                            "register_listener(): vSomeIP listener registration failed on all filter variants",
-                        );
-                    }
-                }
-            }
-        }
-
-        if success {
-            Ok(())
+            self.register_cloud_listener(source_filter, sink_filter, listener)
+                .await
         } else {
-            Err(last_err.unwrap_or_else(|| {
-                UStatus::fail_with_code(up_rust::UCode::UNAVAILABLE, "No transport available")
-            }))
+            self.register_local_vsomeip_listener(source_filter, sink_filter, listener)
+                .await
         }
     }
 
@@ -611,142 +687,12 @@ impl UTransport for PacomRouter {
 
         let is_cloud = self.listener_cloud_path(source_filter, sink_filter);
 
-        let mut success = false;
-        let mut last_err = None;
-
         if is_cloud {
-            if let Some(ref mqtt_tx) = self.mqtt {
-                let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF)
-                    .unwrap();
-                let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
-                match mqtt_tx
-                    .unregister_listener(source_filter, effective_sink, listener.clone())
-                    .await
-                {
-                    Ok(_) => {
-                        success = true;
-                        dbg_log("Router",format!(
-                            "unregister_listener(): mqtt unregister succeeded source={} sink={}",
-                            uri_dbg(source_filter),
-                            effective_sink
-                                .map(uri_dbg)
-                                .unwrap_or_else(|| "<none>".to_string())
-                        ));
-                    }
-                    Err(e) => {
-                        dbg_log("Router",format!(
-                            "unregister_listener(): mqtt unregister failed source={} sink={} code={:?} message={:?}",
-                            uri_dbg(source_filter),
-                            effective_sink
-                                .map(uri_dbg)
-                                .unwrap_or_else(|| "<none>".to_string()),
-                            e.code,
-                            e.message
-                        ));
-                        last_err = Some(e)
-                    }
-                }
-            }
-        }
-
-        if !is_cloud {
-            if let Some(ref v) = self.vsomeip {
-                if let Some(sink) = sink_filter {
-                    if sink.resource_id == 0 {
-                        match v
-                            .unregister_listener(source_filter, sink_filter, listener.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                dbg_log("Router",format!(
-                                    "unregister_listener(): vsomeip RPC response listener unregistered source={} sink={}",
-                                    uri_dbg(source_filter),
-                                    uri_dbg(sink)
-                                ));
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                dbg_log("Router",format!(
-                                    "unregister_listener(): vsomeip RPC response listener unregistration failed: {:?}",
-                                    e
-                                ));
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-                let is_cloud_bound_sink = sink_filter.map(|s| self.is_cloud_bound(s)).unwrap_or(false);
-                let candidates = self.topology.expand_listener_candidates(source_filter, sink_filter, is_cloud_bound_sink);
-
-                if candidates.is_empty() {
-                    dbg_log("Router",format!(
-                        "unregister_listener(): skipping local vSomeIP catch-all source={} sink={}",
-                        uri_dbg(source_filter),
-                        sink_filter
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string())
-                    ));
-                    success = true;
-                } else {
-                    let candidate_list = candidates
-                        .iter()
-                        .map(uri_dbg)
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    dbg_log("Router",format!(
-                        "unregister_listener(): vsomeip candidates={}",
-                        candidate_list
-                    ));
-
-                    for (idx, candidate) in candidates.into_iter().enumerate() {
-                        match v
-                            .unregister_listener(&candidate, sink_filter, listener.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                success = true;
-                                dbg_log("Router",format!(
-                                    "unregister_listener(): vSomeIP listener unregistration succeeded candidate_index={} filter={} sink={}",
-                                    idx,
-                                    uri_dbg(&candidate),
-                                    sink_filter
-                                        .map(uri_dbg)
-                                        .unwrap_or_else(|| "<none>".to_string())
-                                ));
-                                // Depending on transport behavior, we may want to unregister ALL variants
-                                // instead of breaking on first success. Keeping loop going.
-                            }
-                            Err(e) => {
-                                dbg_log("Router",format!(
-                                    "unregister_listener(): vSomeIP candidate failed candidate_index={} filter={} sink={} code={:?} message={:?}",
-                                    idx,
-                                    uri_dbg(&candidate),
-                                    sink_filter
-                                        .map(uri_dbg)
-                                        .unwrap_or_else(|| "<none>".to_string()),
-                                    e.code,
-                                    e.message
-                                ));
-                                last_err = Some(e);
-                            }
-                        }
-                    }
-
-                    if !success {
-                        dbg_log("Router",
-                            "unregister_listener(): vSomeIP listener unregistration failed on all filter variants",
-                        );
-                    }
-                }
-            }
-        }
-
-        if success {
-            Ok(())
+            self.unregister_cloud_listener(source_filter, sink_filter, listener)
+                .await
         } else {
-            Err(last_err.unwrap_or_else(|| {
-                UStatus::fail_with_code(up_rust::UCode::UNAVAILABLE, "No transport available")
-            }))
+            self.unregister_local_vsomeip_listener(source_filter, sink_filter, listener)
+                .await
         }
     }
 

@@ -8,15 +8,6 @@ pub fn is_wildcard_resource_id(resource_id: u32) -> bool {
     resource_id == 0xFFFF || resource_id == u32::MAX
 }
 
-pub fn is_wildcard_major_version(major: u32) -> bool {
-    major == 0xFF
-}
-
-pub fn is_wildcard_source_filter(uri: &UUri) -> bool {
-    let auth = uri.authority_name();
-    (auth.is_empty() || auth == "*") && (is_mqtt_wildcard_ue_id(uri.ue_id) || uri.ue_id == 0)
-}
-
 pub fn normalize_uri_for_vsomeip(uri: &UUri) -> UUri {
     UUri::try_from_parts(
         "",
@@ -37,128 +28,65 @@ impl VsomeipTopologyResolver {
         Self { authority }
     }
 
-    /// Normalizes a wildcard source filter when it explicitly targets a local sink.
-    pub fn normalized_local_source_filter(
+    /// Returns concrete local vSomeIP listener filters without using wildcard major matching.
+    pub fn local_listener_candidates(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        is_cloud_bound_sink: bool,
-    ) -> UUri {
-        let Some(sink) = sink_filter else {
-            return source_filter.clone();
-        };
+    ) -> Vec<UUri> {
+        let source_auth = source_filter.authority_name();
+        let source_uses_any_authority = source_auth.is_empty() || source_auth == "*";
+        let source_uses_any_ue = is_mqtt_wildcard_ue_id(source_filter.ue_id) || source_filter.ue_id == 0;
 
-        if is_wildcard_source_filter(source_filter) && !is_cloud_bound_sink {
-            let resource = if is_wildcard_resource_id(source_filter.resource_id) {
-                sink.resource_id as u16
-            } else {
-                source_filter.resource_id as u16
-            };
+        if let Some(sink) = sink_filter {
+            if source_uses_any_ue && is_wildcard_resource_id(sink.resource_id) {
+                return vec![];
+            }
 
-            if let Ok(uri) =
-                UUri::try_from_parts("", sink.ue_id, sink.ue_version_major as u8, resource)
-            {
-                return uri;
+            if source_uses_any_authority && source_uses_any_ue {
+                let resource = if is_wildcard_resource_id(source_filter.resource_id) {
+                    sink.resource_id as u16
+                } else {
+                    source_filter.resource_id as u16
+                };
+
+                if let Ok(uri) = UUri::try_from_parts(
+                    "",
+                    sink.ue_id,
+                    sink.ue_version_major as u8,
+                    resource,
+                ) {
+                    return vec![uri];
+                }
             }
         }
 
-        source_filter.clone()
-    }
+        let entity_id = source_filter.ue_id;
+        let version_major = source_filter.ue_version_major as u8;
+        let resource_id = source_filter.resource_id as u16;
 
-    pub fn should_skip_local_vsomeip_catchall(
-        &self,
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-        is_cloud_bound_sink: bool,
-    ) -> bool {
-        let Some(sink) = sink_filter else {
-            return false;
-        };
-
-        is_wildcard_source_filter(source_filter)
-            && !is_cloud_bound_sink
-            && is_wildcard_resource_id(sink.resource_id)
-    }
-
-    pub fn should_skip_local_vsomeip_candidate(
-        &self,
-        candidate: &UUri,
-        sink_filter: Option<&UUri>,
-        is_cloud_bound_sink: bool,
-    ) -> bool {
-        let Some(_sink) = sink_filter else {
-            return false;
-        };
-
-        !is_cloud_bound_sink
-            && (is_mqtt_wildcard_ue_id(candidate.ue_id)
-                || is_wildcard_major_version(candidate.ue_version_major)
-                || is_wildcard_resource_id(candidate.resource_id))
-    }
-
-    /// Expands a given source filter and sink filter into a deduplicated list
-    /// of valid vSomeIP UUri candidates, skipping invalid or conflicting ones.
-    pub fn expand_listener_candidates(
-        &self,
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-        is_cloud_bound_sink: bool,
-    ) -> Vec<UUri> {
-        if self.should_skip_local_vsomeip_catchall(source_filter, sink_filter, is_cloud_bound_sink) {
-            return vec![];
-        }
-
-        let normalized_source = self.normalized_local_source_filter(source_filter, sink_filter, is_cloud_bound_sink);
-        let entity_id = normalized_source.ue_id;
-        let version_major = normalized_source.ue_version_major as u8;
-        let resource_id = normalized_source.resource_id;
-
-        let filter_local = UUri::try_from_parts(
+        let normalized_source = UUri::try_from_parts("", entity_id, version_major, resource_id)
+            .unwrap_or_else(|_| source_filter.clone());
+        let local_authority_source = UUri::try_from_parts(
             &self.authority,
             entity_id,
             version_major,
-            resource_id as u16,
+            resource_id,
         )
         .unwrap_or_else(|_| normalized_source.clone());
-        
-        let filter_empty =
-            UUri::try_from_parts("", entity_id, version_major, resource_id as u16)
-                .unwrap_or_else(|_| normalized_source.clone());
 
-        let source_auth = normalized_source.authority_name();
-        let candidates: Vec<UUri> = if !source_auth.is_empty()
-            && source_auth != "*"
-            && source_auth != self.authority
-        {
-            vec![
-                filter_empty.clone(),
-                filter_local.clone(),
-                normalized_source.clone(),
-            ]
+        let candidates = if !source_uses_any_authority && source_auth != self.authority {
+            vec![normalized_source.clone(), local_authority_source, source_filter.clone()]
+        } else if source_uses_any_authority {
+            vec![normalized_source.clone(), local_authority_source]
         } else {
-            vec![
-                normalized_source.clone(),
-                filter_local.clone(),
-                filter_empty.clone(),
-            ]
+            vec![source_filter.clone(), normalized_source.clone()]
         };
 
-        use std::collections::HashSet;
-        
-        let mut unique_candidates = HashSet::new();
-        let mut final_candidates = Vec::new();
-        
-        for candidate in candidates {
-            if unique_candidates.insert(candidate.to_uri(false)) {
-                final_candidates.push(candidate);
-            }
-        }
-
-        final_candidates
+        let mut unique = std::collections::HashSet::new();
+        candidates
             .into_iter()
-            .filter(|candidate| {
-                !self.should_skip_local_vsomeip_candidate(candidate, sink_filter, is_cloud_bound_sink)
-            })
+            .filter(|candidate| unique.insert(candidate.to_uri(false)))
             .collect()
     }
 }
