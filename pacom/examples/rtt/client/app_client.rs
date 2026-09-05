@@ -23,7 +23,10 @@ impl RttClientApp {
 
     pub async fn warm_up(&self, method: &str, count: usize) {
         for _ in 0..count {
-            let _ = self.runtime.invoke_rpc_method(method, b"warmup".to_vec()).await;
+            let _ = self
+                .runtime
+                .invoke_rpc_method(method, b"warmup".to_vec())
+                .await;
         }
     }
 

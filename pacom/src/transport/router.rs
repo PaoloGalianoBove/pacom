@@ -5,23 +5,28 @@ use up_rust::{UListener, UMessage, UStatus, UTransport, UUri};
 use up_transport_mqtt5::Mqtt5Transport;
 use up_transport_vsomeip::UPTransportVsomeip;
 
-use crate::transport::vsomeip_topology::{
-    is_mqtt_wildcard_ue_id, is_wildcard_resource_id, normalize_uri_for_vsomeip,
-    VsomeipTopologyResolver,
-};
-
 /// Pacom router routing messages between vSomeIP and MQTT transports.
 pub struct PacomRouter {
     authority: String,
     vsomeip: Option<Arc<UPTransportVsomeip>>,
     mqtt: Option<Arc<Mqtt5Transport>>,
-    topology: VsomeipTopologyResolver,
 }
 
 use crate::utils::{dbg_log, rpc_diag_enabled, rpc_diag_log, uri_dbg, verbose_debug_enabled};
 
 fn is_local_only_publish(message: &UMessage) -> bool {
     message.attributes.sink.is_none()
+}
+
+fn is_wildcard_resource_id(resource_id: u32) -> bool {
+    resource_id == 0xFFFF || resource_id == u32::MAX
+}
+
+fn configured_cloud_authority() -> Option<String> {
+    std::env::var("PACOM_CLOUD_AUTHORITY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl PacomRouter {
@@ -31,7 +36,6 @@ impl PacomRouter {
         mqtt: Option<Arc<Mqtt5Transport>>,
     ) -> Self {
         Self {
-            topology: VsomeipTopologyResolver::new(authority.clone()),
             authority,
             vsomeip,
             mqtt,
@@ -45,47 +49,48 @@ impl PacomRouter {
     /// MQTT wildcard UE-IDs, or when vSomeIP is unavailable on this node.
     pub fn is_cloud_bound(&self, uri: &UUri) -> bool {
         let target_auth = uri.authority_name();
-        // Empty or wildcard authority means local (broadcast on vSomeIP)
-        if target_auth.is_empty() || target_auth == "*" {
-            dbg_log("Router", format!(
-                "is_cloud_bound=false reason=empty_or_wildcard_authority uri={}",
-                uri_dbg(uri)
-            ));
-            return false;
-        }
-        // If we have no vSomeIP, every message is cloud-bound (MQTT-only node)
-        if self.vsomeip.is_none() {
-            dbg_log("Router", format!(
-                "is_cloud_bound=true reason=no_vsomeip_transport uri={}",
-                uri_dbg(uri)
-            ));
+
+        // Explicit cross-domain marker used by publish_to_authority():
+        // //configured-cloud-authority/0/0/0.
+        if uri.ue_id == 0
+            && uri.ue_version_major == 0
+            && uri.resource_id == 0
+            && configured_cloud_authority().as_deref() == Some(&target_auth)
+        {
+            dbg_log(
+                "Router",
+                format!(
+                    "is_cloud_bound=true reason=explicit_cross_domain_marker uri={}",
+                    uri_dbg(uri)
+                ),
+            );
             return true;
         }
 
-        // Explicit cross-domain marker used by publish_to_authority(): //authority/0/0/0
-        if uri.ue_id == 0 && uri.ue_version_major == 0 && uri.resource_id == 0 {
-            dbg_log("Router",format!(
-                "is_cloud_bound=true reason=explicit_cross_domain_marker uri={}",
-                uri_dbg(uri)
-            ));
-            return true;
-        }
-
-        // MQTT authority-level wildcard subscriptions can be represented either as
-        // 16-bit wildcard (0xFFFF) or full-width wildcard (0xFFFFFFFF).
-        if is_mqtt_wildcard_ue_id(uri.ue_id) {
-            dbg_log("Router",format!(
-                "is_cloud_bound=true reason=mqtt_wildcard_ue_id uri={}",
-                uri_dbg(uri)
-            ));
+        // A wildcard or empty authority alone describes a generic filter, not a
+        // cloud route. The cloud sink marker or configured authority must decide it.
+        if configured_cloud_authority().as_deref() == Some(&target_auth)
+            && !target_auth.is_empty()
+            && target_auth != "*"
+        {
+            dbg_log(
+                "Router",
+                format!(
+                    "is_cloud_bound=true reason=configured_cloud_authority uri={}",
+                    uri_dbg(uri)
+                ),
+            );
             return true;
         }
 
         // Otherwise keep addressed traffic on vSomeIP even across different authorities.
-        dbg_log("Router",format!(
-            "is_cloud_bound=false reason=default_local_vsomeip uri={}",
-            uri_dbg(uri)
-        ));
+        dbg_log(
+            "Router",
+            format!(
+                "is_cloud_bound=false reason=local_or_generic_filter uri={}",
+                uri_dbg(uri)
+            ),
+        );
         false
     }
 
@@ -93,25 +98,31 @@ impl PacomRouter {
         // If a local sink is explicitly provided, this listener is intended for local routing.
         if let Some(sink) = sink_filter {
             if !self.is_cloud_bound(sink) {
-                dbg_log("Router",format!(
-                    "listener_cloud_path=false reason=explicit_local_sink source={} sink={}",
-                    uri_dbg(source_filter),
-                    uri_dbg(sink)
-                ));
+                dbg_log(
+                    "Router",
+                    format!(
+                        "listener_cloud_path=false reason=explicit_local_sink source={} sink={}",
+                        uri_dbg(source_filter),
+                        uri_dbg(sink)
+                    ),
+                );
                 return false;
             }
         }
 
         let decision = self.is_cloud_bound(source_filter)
             || sink_filter.map(|s| self.is_cloud_bound(s)).unwrap_or(false);
-        dbg_log("Router",format!(
-            "listener_cloud_path={} source={} sink={}",
-            decision,
-            uri_dbg(source_filter),
-            sink_filter
-                .map(uri_dbg)
-                .unwrap_or_else(|| "<none>".to_string())
-        ));
+        dbg_log(
+            "Router",
+            format!(
+                "listener_cloud_path={} source={} sink={}",
+                decision,
+                uri_dbg(source_filter),
+                sink_filter
+                    .map(uri_dbg)
+                    .unwrap_or_else(|| "<none>".to_string())
+            ),
+        );
         decision
     }
 
@@ -129,55 +140,62 @@ impl PacomRouter {
             ));
         };
 
-        let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF).unwrap();
-        let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
+        let sink_filter = sink_filter.ok_or_else(|| {
+            UStatus::fail_with_code(
+                up_rust::UCode::INVALID_ARGUMENT,
+                "Cloud listener registration requires a sink filter",
+            )
+        })?;
         let mut retries = 50;
         let mut attempt = 1;
         loop {
             match mqtt_tx
-                .register_listener(source_filter, effective_sink, listener.clone())
+                .register_listener(source_filter, Some(sink_filter), listener.clone())
                 .await
             {
                 Ok(_) => {
-                    dbg_log("Router",format!(
-                        "register_cloud_listener(): mqtt registration succeeded attempts={} source={} sink={}",
-                        attempt,
-                        uri_dbg(source_filter),
-                        effective_sink
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string())
-                    ));
+                    dbg_log(
+                        "Router",
+                        format!(
+                            "register_cloud_listener(): mqtt registration succeeded attempts={} source={} sink={}",
+                            attempt,
+                            uri_dbg(source_filter),
+                            uri_dbg(sink_filter)
+                        ),
+                    );
                     return Ok(());
                 }
                 Err(e)
                     if e.code.enum_value_or_default() == up_rust::UCode::UNAVAILABLE
                         && retries > 0 =>
                 {
-                    dbg_log("Router",format!(
-                        "register_cloud_listener(): mqtt unavailable retry attempt={} remaining={} source={} sink={} code={:?}",
-                        attempt,
-                        retries,
-                        uri_dbg(source_filter),
-                        effective_sink
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        e.code
-                    ));
+                    dbg_log(
+                        "Router",
+                        format!(
+                            "register_cloud_listener(): mqtt unavailable retry attempt={} remaining={} source={} sink={} code={:?}",
+                            attempt,
+                            retries,
+                            uri_dbg(source_filter),
+                            uri_dbg(sink_filter),
+                            e.code
+                        ),
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     retries -= 1;
                     attempt += 1;
                 }
                 Err(e) => {
-                    dbg_log("Router",format!(
-                        "register_cloud_listener(): mqtt registration failed attempt={} source={} sink={} code={:?} message={:?}",
-                        attempt,
-                        uri_dbg(source_filter),
-                        effective_sink
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        e.code,
-                        e.message
-                    ));
+                    dbg_log(
+                        "Router",
+                        format!(
+                            "register_cloud_listener(): mqtt registration failed attempt={} source={} sink={} code={:?} message={:?}",
+                            attempt,
+                            uri_dbg(source_filter),
+                            uri_dbg(sink_filter),
+                            e.code,
+                            e.message
+                        ),
+                    );
                     return Err(e);
                 }
             }
@@ -197,63 +215,7 @@ impl PacomRouter {
             ));
         };
 
-        if let Some(sink) = sink_filter {
-            if sink.resource_id == 0 {
-                return v.register_listener(source_filter, sink_filter, listener).await;
-            }
-        }
-
-        let candidates = self.topology.local_listener_candidates(source_filter, sink_filter);
-        if candidates.is_empty() {
-            dbg_log("Router",format!(
-                "register_local_vsomeip_listener(): skipping catch-all source={} sink={}",
-                uri_dbg(source_filter),
-                sink_filter
-                    .map(uri_dbg)
-                    .unwrap_or_else(|| "<none>".to_string())
-            ));
-            return Ok(());
-        }
-
-        let mut last_err = None;
-        for (idx, candidate) in candidates.into_iter().enumerate() {
-            match v
-                .register_listener(&candidate, sink_filter, listener.clone())
-                .await
-            {
-                Ok(_) => {
-                    dbg_log("Router",format!(
-                        "register_local_vsomeip_listener(): success candidate_index={} filter={} sink={}",
-                        idx,
-                        uri_dbg(&candidate),
-                        sink_filter
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string())
-                    ));
-                    return Ok(());
-                }
-                Err(e) => {
-                    dbg_log("Router",format!(
-                        "register_local_vsomeip_listener(): candidate failed candidate_index={} filter={} sink={} code={:?} message={:?}",
-                        idx,
-                        uri_dbg(&candidate),
-                        sink_filter
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        e.code,
-                        e.message
-                    ));
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| {
-            UStatus::fail_with_code(
-                up_rust::UCode::UNAVAILABLE,
-                "No local vSomeIP listener candidate available",
-            )
-        }))
+        v.register_listener(source_filter, sink_filter, listener).await
     }
 
     async fn unregister_cloud_listener(
@@ -269,10 +231,14 @@ impl PacomRouter {
             ));
         };
 
-        let default_sink = UUri::try_from_parts(&self.authority, 0xFFFF, 0xFF, 0xFFFF).unwrap();
-        let effective_sink = Some(sink_filter.unwrap_or(&default_sink));
+        let sink_filter = sink_filter.ok_or_else(|| {
+            UStatus::fail_with_code(
+                up_rust::UCode::INVALID_ARGUMENT,
+                "Cloud listener unregistration requires a sink filter",
+            )
+        })?;
         mqtt_tx
-            .unregister_listener(source_filter, effective_sink, listener)
+            .unregister_listener(source_filter, Some(sink_filter), listener)
             .await
     }
 
@@ -289,68 +255,8 @@ impl PacomRouter {
             ));
         };
 
-        if let Some(sink) = sink_filter {
-            if sink.resource_id == 0 {
-                return v.unregister_listener(source_filter, sink_filter, listener).await;
-            }
-        }
-
-        let candidates = self.topology.local_listener_candidates(source_filter, sink_filter);
-        if candidates.is_empty() {
-            dbg_log("Router",format!(
-                "unregister_local_vsomeip_listener(): skipping catch-all source={} sink={}",
-                uri_dbg(source_filter),
-                sink_filter
-                    .map(uri_dbg)
-                    .unwrap_or_else(|| "<none>".to_string())
-            ));
-            return Ok(());
-        }
-
-        let mut success = false;
-        let mut last_err = None;
-        for (idx, candidate) in candidates.into_iter().enumerate() {
-            match v
-                .unregister_listener(&candidate, sink_filter, listener.clone())
-                .await
-            {
-                Ok(_) => {
-                    success = true;
-                    dbg_log("Router",format!(
-                        "unregister_local_vsomeip_listener(): success candidate_index={} filter={} sink={}",
-                        idx,
-                        uri_dbg(&candidate),
-                        sink_filter
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string())
-                    ));
-                }
-                Err(e) => {
-                    dbg_log("Router",format!(
-                        "unregister_local_vsomeip_listener(): candidate failed candidate_index={} filter={} sink={} code={:?} message={:?}",
-                        idx,
-                        uri_dbg(&candidate),
-                        sink_filter
-                            .map(uri_dbg)
-                            .unwrap_or_else(|| "<none>".to_string()),
-                        e.code,
-                        e.message
-                    ));
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        if success {
-            Ok(())
-        } else {
-            Err(last_err.unwrap_or_else(|| {
-                UStatus::fail_with_code(
-                    up_rust::UCode::UNAVAILABLE,
-                    "No local vSomeIP listener candidate available",
-                )
-            }))
-        }
+        v.unregister_listener(source_filter, sink_filter, listener)
+            .await
     }
 }
 
@@ -370,73 +276,43 @@ impl UTransport for PacomRouter {
                 .as_ref()
                 .map(|u| u.to_uri(false))
                 .unwrap_or_else(|| "<none>".to_string());
-            dbg_log("Router",format!(
-                "send(): source={}, sink={}, has_payload={}",
-                source,
-                sink,
-                message.payload.is_some()
-            ));
+            dbg_log(
+                "Router",
+                format!(
+                    "send(): source={}, sink={}, has_payload={}",
+                    source,
+                    sink,
+                    message.payload.is_some()
+                ),
+            );
         }
 
         if is_local_only_publish(&message) {
-            // It's a Publish message. Broadcast to all available transports.
+            // A Publish without a sink is a local event. Do not mirror it to
+            // MQTT implicitly; missing vSomeIP must remain an explicit error.
             let mut success = false;
             let mut last_err = None;
-
-            if let Some(ref mqtt_tx) = self.mqtt {
-                let mqtt_msg = message.clone();
-                trace!("[Router] Broadcasting Publish to MQTT transport");
-                match mqtt_tx.send(mqtt_msg).await {
-                    Ok(_) => {
-                        success = true;
-                        dbg_log("Router","send(): publish->mqtt result=ok");
-                    }
-                    Err(e) => {
-                        dbg_log("Router",format!(
-                            "send(): publish->mqtt result=err code={:?} message={:?}",
-                            e.code, e.message
-                        ));
-                        if !success {
-                            last_err = Some(e);
-                        }
-                    }
-                }
-            }
 
             if let Some(ref v) = self.vsomeip {
                 trace!("[Router] Broadcasting Publish to local vSomeIP transport");
                 let mut vsomeip_msg = message;
                 if let Some(source) = vsomeip_msg.attributes.source.as_ref().cloned() {
-                    dbg_log("Router",format!(
-                        "PUBLISH_PATH raw source={} major={} resource={} wildcard_resource={}",
-                        uri_dbg(&source),
-                        source.ue_version_major,
-                        source.resource_id,
-                        is_wildcard_resource_id(source.resource_id)
-                    ));
-
-                    // Keep publish semantics unchanged. Normalize only authority for local vSomeIP.
-                    let normalized_source = UUri::try_from_parts(
-                        "",
-                        source.ue_id,
-                        source.ue_version_major as u8,
-                        source.resource_id as u16,
-                    )
-                    .unwrap_or_else(|_| source.clone());
-
-                    if normalized_source.to_uri(false) != source.to_uri(false) {
-                        dbg_log("Router",format!(
-                            "VSOMEIP_REWRITE source={} normalized_source={}",
+                    dbg_log(
+                        "Router",
+                        format!(
+                            "PUBLISH_PATH raw source={} major={} resource={} wildcard_resource={}",
                             uri_dbg(&source),
-                            uri_dbg(&normalized_source)
-                        ));
-                    }
+                            source.ue_version_major,
+                            source.resource_id,
+                            is_wildcard_resource_id(source.resource_id)
+                        ),
+                    );
 
-                    if let Some(attrs) = vsomeip_msg.attributes.as_mut() {
-                        attrs.source = Some(normalized_source).into();
-                    }
+                    // Keep the complete uProtocol source URI. The vSomeIP
+                    // transport maps only its numeric fields to SOME/IP.
                 } else {
-                    dbg_log("Router",
+                    dbg_log(
+                        "Router",
                         "PUBLISH_PATH source_missing; using original publish message on vSomeIP",
                     );
                 }
@@ -447,22 +323,28 @@ impl UTransport for PacomRouter {
                     .as_ref()
                     .map(uri_dbg)
                     .unwrap_or_else(|| "<none>".to_string());
-                dbg_log("Router",format!(
-                    "PUBLISH_PATH final_vsmsg source={} sink=<none> payload_len={}",
-                    final_source,
-                    vsomeip_msg.payload.as_ref().map(|p| p.len()).unwrap_or(0)
-                ));
+                dbg_log(
+                    "Router",
+                    format!(
+                        "PUBLISH_PATH final_vsmsg source={} sink=<none> payload_len={}",
+                        final_source,
+                        vsomeip_msg.payload.as_ref().map(|p| p.len()).unwrap_or(0)
+                    ),
+                );
 
                 match v.send(vsomeip_msg).await {
                     Ok(_) => {
                         success = true;
-                        dbg_log("Router","VSOMEIP_SEND_RESULT result=ok");
+                        dbg_log("Router", "VSOMEIP_SEND_RESULT result=ok");
                     }
                     Err(e) => {
-                        dbg_log("Router",format!(
-                            "VSOMEIP_SEND_RESULT result=err code={:?} message={:?}",
-                            e.code, e.message
-                        ));
+                        dbg_log(
+                            "Router",
+                            format!(
+                                "VSOMEIP_SEND_RESULT result=err code={:?} message={:?}",
+                                e.code, e.message
+                            ),
+                        );
                         if !success {
                             last_err = Some(e);
                         }
@@ -471,13 +353,13 @@ impl UTransport for PacomRouter {
             }
 
             if success {
-                dbg_log("Router","send(): publish broadcast succeeded on at least one transport");
+                dbg_log("Router", "send(): local publish succeeded on vSomeIP");
                 return Ok(());
             } else if let Some(e) = last_err {
-                dbg_log("Router",format!(
-                    "send(): publish broadcast failed with code={:?}",
-                    e.code
-                ));
+                dbg_log(
+                    "Router",
+                    format!("send(): publish broadcast failed with code={:?}", e.code),
+                );
                 return Err(e);
             } else {
                 return Err(UStatus::fail_with_code(
@@ -490,22 +372,28 @@ impl UTransport for PacomRouter {
         // Addressed message (Notification/RPC): route based on the sink authority.
         let sink = message.attributes.sink.as_ref().unwrap();
         let is_cloud = self.is_cloud_bound(sink);
-        dbg_log("Router",format!(
-            "send(): addressed message cloud_bound={} for sink={}",
-            is_cloud,
-            sink.to_uri(false)
-        ));
+        dbg_log(
+            "Router",
+            format!(
+                "send(): addressed message cloud_bound={} for sink={}",
+                is_cloud,
+                sink.to_uri(false)
+            ),
+        );
 
         if is_cloud {
             if let Some(ref mqtt_tx) = self.mqtt {
                 trace!("[Router] Routing cloud message to MQTT 5 transport");
                 let out = mqtt_tx.send(message).await;
                 match &out {
-                    Ok(_) => dbg_log("Router","send(): addressed->mqtt result=ok"),
-                    Err(e) => dbg_log("Router",format!(
-                        "send(): addressed->mqtt result=err code={:?} message={:?}",
-                        e.code, e.message
-                    )),
+                    Ok(_) => dbg_log("Router", "send(): addressed->mqtt result=ok"),
+                    Err(e) => dbg_log(
+                        "Router",
+                        format!(
+                            "send(): addressed->mqtt result=err code={:?} message={:?}",
+                            e.code, e.message
+                        ),
+                    ),
                 }
                 out
             } else {
@@ -539,30 +427,8 @@ impl UTransport for PacomRouter {
                 ));
 
                 if let Some(attrs) = vsomeip_msg.attributes.as_mut() {
-                    // For RPC requests on local vSomeIP, normalize only source authority.
-                    // Keep UE/version/resource untouched so caller identity is preserved.
-                    if let (Some(source), Some(sink)) =
-                        (attrs.source.as_ref().cloned(), attrs.sink.as_ref().cloned())
-                    {
-                        let is_rpc_request_like = source.resource_id == 0 && sink.resource_id != 0;
-                        if is_rpc_request_like {
-                            if let Ok(normalized_source) = UUri::try_from_parts(
-                                "",
-                                source.ue_id,
-                                source.ue_version_major as u8,
-                                source.resource_id as u16,
-                            ) {
-                                if normalized_source.to_uri(false) != source.to_uri(false) {
-                                    rpc_diag_log(format!(
-                                        "addressed_local request_source_normalized old={} new={}",
-                                        uri_dbg(&source),
-                                        uri_dbg(&normalized_source)
-                                    ));
-                                }
-                                attrs.source = Some(normalized_source).into();
-                            }
-                        }
-                    }
+                    // Keep source and sink authorities intact. The vSomeIP
+                    // backend ignores authority when building the SOME/IP IDs.
 
                     if let Some(sink) = attrs.sink.as_ref().cloned() {
                         let is_rpc_response_like = sink.resource_id == 0;
@@ -572,15 +438,8 @@ impl UTransport for PacomRouter {
                                 uri_dbg(&sink)
                             ));
                         } else {
-                            let normalized = normalize_uri_for_vsomeip(&sink);
-                            if normalized.to_uri(false) != sink.to_uri(false) {
-                                dbg_log("Router",format!(
-                                    "VSOMEIP_REWRITE addressed sink={} normalized_sink={}",
-                                    uri_dbg(&sink),
-                                    uri_dbg(&normalized)
-                                ));
-                            }
-                            attrs.sink = Some(normalized).into();
+                            // Keep the complete sink URI for uProtocol-level
+                            // identity while forwarding it to vSomeIP.
                         }
                     }
                 }
@@ -604,7 +463,8 @@ impl UTransport for PacomRouter {
 
                 if rpc_diag_enabled() {
                     if let Some(attrs) = vsomeip_msg.attributes.as_ref() {
-                        if let (Some(src), Some(snk)) = (attrs.source.as_ref(), attrs.sink.as_ref()) {
+                        if let (Some(src), Some(snk)) = (attrs.source.as_ref(), attrs.sink.as_ref())
+                        {
                             // RPC responses normally target the caller's reply sink (resource_id=0).
                             // If source and sink UE coincide, we may be routing the reply to self.
                             if snk.resource_id == 0 && src.ue_id == snk.ue_id {
@@ -621,14 +481,17 @@ impl UTransport for PacomRouter {
                 let out = v.send(vsomeip_msg).await;
                 match &out {
                     Ok(_) => {
-                        dbg_log("Router","send(): addressed->vsomeip result=ok");
+                        dbg_log("Router", "send(): addressed->vsomeip result=ok");
                         rpc_diag_log("addressed_local send_result=ok");
                     }
                     Err(e) => {
-                        dbg_log("Router",format!(
-                            "send(): addressed->vsomeip result=err code={:?} message={:?}",
-                            e.code, e.message
-                        ));
+                        dbg_log(
+                            "Router",
+                            format!(
+                                "send(): addressed->vsomeip result=err code={:?} message={:?}",
+                                e.code, e.message
+                            ),
+                        );
                         rpc_diag_log(format!(
                             "addressed_local send_result=err code={:?} message={:?}",
                             e.code, e.message
@@ -651,16 +514,22 @@ impl UTransport for PacomRouter {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UListener>,
     ) -> Result<(), UStatus> {
-        dbg_log("Router",format!(
-            "register_listener(): source_filter={}, sink_filter={}",
-            source_filter.to_uri(false),
-            sink_filter
-                .map(|u| u.to_uri(false))
-                .unwrap_or_else(|| "<none>".to_string())
-        ));
+        dbg_log(
+            "Router",
+            format!(
+                "register_listener(): source_filter={}, sink_filter={}",
+                source_filter.to_uri(false),
+                sink_filter
+                    .map(|u| u.to_uri(false))
+                    .unwrap_or_else(|| "<none>".to_string())
+            ),
+        );
 
         let is_cloud = self.listener_cloud_path(source_filter, sink_filter);
-        dbg_log("Router",format!("register_listener(): cloud_path={}", is_cloud));
+        dbg_log(
+            "Router",
+            format!("register_listener(): cloud_path={}", is_cloud),
+        );
 
         if is_cloud {
             self.register_cloud_listener(source_filter, sink_filter, listener)
@@ -677,13 +546,16 @@ impl UTransport for PacomRouter {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UListener>,
     ) -> Result<(), UStatus> {
-        dbg_log("Router",format!(
-            "unregister_listener(): source_filter={}, sink_filter={}",
-            source_filter.to_uri(false),
-            sink_filter
-                .map(|u| u.to_uri(false))
-                .unwrap_or_else(|| "<none>".to_string())
-        ));
+        dbg_log(
+            "Router",
+            format!(
+                "unregister_listener(): source_filter={}, sink_filter={}",
+                source_filter.to_uri(false),
+                sink_filter
+                    .map(|u| u.to_uri(false))
+                    .unwrap_or_else(|| "<none>".to_string())
+            ),
+        );
 
         let is_cloud = self.listener_cloud_path(source_filter, sink_filter);
 
@@ -701,14 +573,27 @@ impl UTransport for PacomRouter {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Result<UMessage, UStatus> {
-        dbg_log("Router",format!(
-            "receive(): source_filter={} sink_filter={}",
-            uri_dbg(source_filter),
-            sink_filter
-                .map(uri_dbg)
-                .unwrap_or_else(|| "<none>".to_string())
-        ));
-        if let Some(ref v) = self.vsomeip {
+        dbg_log(
+            "Router",
+            format!(
+                "receive(): source_filter={} sink_filter={}",
+                uri_dbg(source_filter),
+                sink_filter
+                    .map(uri_dbg)
+                    .unwrap_or_else(|| "<none>".to_string())
+            ),
+        );
+        let is_cloud = self.listener_cloud_path(source_filter, sink_filter);
+        if is_cloud {
+            if let Some(ref mqtt_tx) = self.mqtt {
+                mqtt_tx.receive(source_filter, sink_filter).await
+            } else {
+                Err(UStatus::fail_with_code(
+                    up_rust::UCode::UNAVAILABLE,
+                    "Cloud-bound receive requires MQTT transport",
+                ))
+            }
+        } else if let Some(ref v) = self.vsomeip {
             let out = v.receive(source_filter, sink_filter).await;
             match &out {
                 Ok(msg) => {
@@ -724,25 +609,29 @@ impl UTransport for PacomRouter {
                         .as_ref()
                         .map(uri_dbg)
                         .unwrap_or_else(|| "<none>".to_string());
-                    dbg_log("Router",format!(
-                        "receive(): message received source={} sink={} payload_len={}",
-                        src,
-                        sink,
-                        msg.payload.as_ref().map(|p| p.len()).unwrap_or(0)
-                    ));
+                    dbg_log(
+                        "Router",
+                        format!(
+                            "receive(): message received source={} sink={} payload_len={}",
+                            src,
+                            sink,
+                            msg.payload.as_ref().map(|p| p.len()).unwrap_or(0)
+                        ),
+                    );
                 }
-                Err(e) => dbg_log("Router",format!(
-                    "receive(): failed code={:?} message={:?}",
-                    e.code, e.message
-                )),
+                Err(e) => dbg_log(
+                    "Router",
+                    format!(
+                        "receive(): failed code={:?} message={:?}",
+                        e.code, e.message
+                    ),
+                ),
             }
             out
-        } else if let Some(ref mqtt_tx) = self.mqtt {
-            mqtt_tx.receive(source_filter, sink_filter).await
         } else {
             Err(UStatus::fail_with_code(
                 up_rust::UCode::UNAVAILABLE,
-                "No transport available",
+                "Local receive requires vSomeIP transport",
             ))
         }
     }

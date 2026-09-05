@@ -20,7 +20,6 @@ Qui vengono materializzati i socket verso l'infrastruttura veicolare e cloud.
 - **`vsomeip.rs`**: Effettua il setup dinamico di vSomeIP e la negoziazione dei ruoli sul nodo.
 - **`mqtt.rs`**: Configura la connessione persistente al broker MQTT5 per i messaggi off-vehicle.
 - **`router.rs (PacomRouter)`**: Un oggetto che implementa l'interfaccia standard `UTransport`. Per ogni messaggio calcola la destinazione tramite `is_cloud_bound` e instrada il payload.
-- **`vsomeip_topology.rs (VsomeipTopologyResolver)`**: Un modulo di adattamento che protegge il router dalle rigidità di vSomeIP. Poiché vSomeIP non gestisce direttamente le wildcard nello stesso modo di uProtocol, questo modulo converte le iscrizioni wildcard in un insieme deduplicato di istanze concrete.
 
 ## Gestione Errori (`error.rs`)
 Ogni fallimento interno (timeout di discovery, collisioni ID, configurazioni errate) viene intercettato usando la libreria `thiserror` (struttura `PacomError`).

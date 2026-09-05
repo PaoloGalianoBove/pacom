@@ -56,12 +56,22 @@ impl From<PacomError> for UStatus {
     fn from(error: PacomError) -> Self {
         match error {
             PacomError::Transport(status) => status,
-            PacomError::ManifestViolation { .. } => UStatus::fail_with_code(UCode::PERMISSION_DENIED, error.to_string()),
-            PacomError::DiscoveryTimeout { .. } => UStatus::fail_with_code(UCode::DEADLINE_EXCEEDED, error.to_string()),
+            PacomError::ManifestViolation { .. } => {
+                UStatus::fail_with_code(UCode::PERMISSION_DENIED, error.to_string())
+            }
+            PacomError::DiscoveryTimeout { .. } => {
+                UStatus::fail_with_code(UCode::DEADLINE_EXCEEDED, error.to_string())
+            }
             PacomError::Config(_) => UStatus::fail_with_code(UCode::INTERNAL, error.to_string()),
-            PacomError::IdCollision { .. } => UStatus::fail_with_code(UCode::ALREADY_EXISTS, error.to_string()),
-            PacomError::EmptyResponse => UStatus::fail_with_code(UCode::NOT_FOUND, error.to_string()),
-            PacomError::RpcError(_) => UStatus::fail_with_code(UCode::UNAVAILABLE, error.to_string()),
+            PacomError::IdCollision { .. } => {
+                UStatus::fail_with_code(UCode::ALREADY_EXISTS, error.to_string())
+            }
+            PacomError::EmptyResponse => {
+                UStatus::fail_with_code(UCode::NOT_FOUND, error.to_string())
+            }
+            PacomError::RpcError(_) => {
+                UStatus::fail_with_code(UCode::UNAVAILABLE, error.to_string())
+            }
         }
     }
 }

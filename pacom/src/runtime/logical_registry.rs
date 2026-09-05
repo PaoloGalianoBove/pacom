@@ -86,10 +86,14 @@ impl ManifestConfig {
         let mut rpc_used = HashSet::new();
         for name in &self.rpc.provide {
             let mut id = stable_id16("rpc", name) & 0x7FFF;
-            if id == 0 { id = 1; }
+            if id == 0 {
+                id = 1;
+            }
             while rpc_used.contains(&id) {
                 id = (id.wrapping_add(1)) & 0x7FFF;
-                if id == 0 { id = 1; }
+                if id == 0 {
+                    id = 1;
+                }
             }
             rpc_used.insert(id);
             self.resolved_rpc_ids.insert(name.clone(), id);

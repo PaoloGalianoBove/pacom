@@ -5,13 +5,18 @@ use tokio::time::sleep;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Birthday Paradox] Starting application...");
-    println!("[Birthday Paradox] This app provides 400 topics, which statistically guarantees at least one 15-bit FNV1a hash collision.");
-    
+    println!(
+        "[Birthday Paradox] This app provides 400 topics, which statistically guarantees at least one 15-bit FNV1a hash collision."
+    );
+
     // Set environment variables for UE ID and Manifest Path
     unsafe {
         std::env::set_var("UP_UE_ID", "21761"); // 0x5501
         if std::env::var("PACOM_MANIFEST_PATH").is_err() {
-            std::env::set_var("PACOM_MANIFEST_PATH", "examples/birthday_paradox/publisher/manifest.json");
+            std::env::set_var(
+                "PACOM_MANIFEST_PATH",
+                "examples/birthday_paradox/publisher/manifest.json",
+            );
         }
     }
 
@@ -29,7 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Birthday Paradox] Waiting 3 seconds to allow Subscriber to discover our service...");
     sleep(Duration::from_secs(3)).await;
 
-    println!("[Birthday Paradox] If you see this message, the PACOM-SD Gossip Protocol successfully resolved all ID collisions dynamically!");
+    println!(
+        "[Birthday Paradox] If you see this message, the PACOM-SD Gossip Protocol successfully resolved all ID collisions dynamically!"
+    );
 
     // Keep the main thread alive
     // We loop 10 times to ensure vsomeip has enough time to establish routing.

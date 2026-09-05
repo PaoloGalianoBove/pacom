@@ -211,10 +211,7 @@ fn maybe_autofix_config_services(config_path: &str, ue_id: u16) -> Result<String
                         modified = true;
                     }
                     let expected = topic_publish_port.to_string();
-                    let current = obj
-                        .get("unreliable")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let current = obj.get("unreliable").and_then(|v| v.as_str()).unwrap_or("");
                     if current != expected {
                         obj.insert(
                             "unreliable".to_string(),
@@ -356,7 +353,7 @@ pub async fn setup_vsomeip_transport(
     unsafe {
         std::env::set_var("VSOMEIP_BASE_PATH", IPC_DIR);
     }
-    
+
     dbg_log(format!(
         "setup start: ue_id=0x{:04X} authority='{}' role_override={:?} lock_stale_ms={} election_wait_ms={}",
         ue_id,
@@ -469,7 +466,8 @@ pub async fn setup_vsomeip_transport(
 
     // 4. Construct the configuration dynamically using serde_json to avoid hardcoded string templates
     let config_path = format!("/tmp/vsomeip-{}.json", app_name);
-    let default_log_level = std::env::var("PACOM_VSOMEIP_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
+    let default_log_level =
+        std::env::var("PACOM_VSOMEIP_LOG_LEVEL").unwrap_or_else(|_| "error".to_string());
 
     let config_value = if is_router {
         serde_json::json!({
@@ -597,12 +595,20 @@ fn get_local_ip() -> String {
     if let Ok(ip) = std::env::var("PACOM_VSOMEIP_UNICAST_IP") {
         let ip = ip.trim();
         if !ip.is_empty() {
-            dbg_log(format!("get_local_ip: using PACOM_VSOMEIP_UNICAST_IP={}", ip));
+            dbg_log(format!(
+                "get_local_ip: using PACOM_VSOMEIP_UNICAST_IP={}",
+                ip
+            ));
             return ip.to_string();
         }
     }
 
-    for probe in ["8.8.8.8:80", "172.17.0.1:80", "192.168.0.1:80", "10.0.0.1:80"] {
+    for probe in [
+        "8.8.8.8:80",
+        "172.17.0.1:80",
+        "192.168.0.1:80",
+        "10.0.0.1:80",
+    ] {
         if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
             if socket.connect(probe).is_ok() {
                 if let Ok(local_addr) = socket.local_addr() {

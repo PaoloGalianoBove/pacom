@@ -36,15 +36,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .subscribe_event(TOPIC_STATUS, move |payload| {
             let current_status_clone = current_status_clone.clone();
             async move {
-            let status = String::from_utf8_lossy(&payload).into_owned();
-            if let Ok(mut lock) = current_status_clone.write() {
-                *lock = status.clone();
-            }
-            println!(
-                "\n[DASHBOARD - RICEVUTO AGGIORNAMENTO] Stato luci cambiato in: {}",
-                status
-            );
-            print_menu(&status);
+                let status = String::from_utf8_lossy(&payload).into_owned();
+                if let Ok(mut lock) = current_status_clone.write() {
+                    *lock = status.clone();
+                }
+                println!(
+                    "\n[DASHBOARD - RICEVUTO AGGIORNAMENTO] Stato luci cambiato in: {}",
+                    status
+                );
+                print_menu(&status);
             }
         })
         .await?;
