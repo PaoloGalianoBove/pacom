@@ -6,7 +6,7 @@ use performance::{PerformanceSampler, write_rtt_file};
 
 const NUM_REQUESTS: usize = 10_000;
 const WARMUP_REQUESTS: usize = 10;
-const RTT_OUTPUT_FILE: &str = "rtt_measurements.csv";
+const DEFAULT_RTT_OUTPUT_FILE: &str = "rtt_measurements.csv";
 const RPC_METHOD: &str = "/rpc/rtt/echo";
 
 #[tokio::main]
@@ -53,7 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    write_rtt_file(RTT_OUTPUT_FILE, &rtt_measurements)?;
+    let output_file = std::env::var("PACOM_RTT_OUTPUT_PATH")
+        .unwrap_or_else(|_| DEFAULT_RTT_OUTPUT_FILE.to_string());
+    write_rtt_file(&output_file, &rtt_measurements)?;
 
     Ok(())
 }

@@ -98,9 +98,13 @@ RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox" /opt/pacom/bin/birthday_paradox || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox_pub" /opt/pacom/bin/birthday_paradox_pub || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox_sub" /opt/pacom/bin/birthday_paradox_sub || true && \
+    ROUTER_BIN="$(find "${PACOM_DIR}/target/release/build" -type f -path '*/out/build/examples/routingmanagerd/routingmanagerd' -print -quit)" && \
+    test -n "${ROUTER_BIN}" && \
+    cp "${ROUTER_BIN}" /opt/pacom/bin/pacom-vsomeip-router && \
     cp -r "${PACOM_DIR}/examples/mqtt_bridge" /opt/pacom/examples/ && \
     cp -r "${PACOM_DIR}/examples/birthday_paradox" /opt/pacom/examples/ && \
-    cp -r "${PACOM_DIR}/examples/rtt" /opt/pacom/examples/
+    cp -r "${PACOM_DIR}/examples/rtt" /opt/pacom/examples/ && \
+    cp -r "${PACOM_DIR}/docker" /opt/pacom/
 
 FROM ubuntu:24.04 AS runtime
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -120,7 +124,7 @@ COPY --from=builder /opt/pacom-runtime/lib/ /usr/local/lib/
 COPY --from=builder /opt/pacom/ /opt/pacom/
 RUN ln -s /opt/pacom/bin/* /usr/local/bin/
 
-RUN ldconfig
+RUN chmod +x /opt/pacom/docker/*.sh && ldconfig
 
 EXPOSE 30491 30492 30490/udp
 CMD ["/bin/bash"]

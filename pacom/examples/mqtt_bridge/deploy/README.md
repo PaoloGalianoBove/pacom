@@ -116,7 +116,7 @@ docker run -it --rm \
 | `PACOM_MQTT_BROKER_URI` | URI del broker MQTT | `mqtt://127.0.0.1:1883` |
 | `PACOM_CLOUD_AUTHORITY` | **Obbligatoria** — Authority della sink cloud | *(nessun default)* |
 | `PACOM_DISABLE_VSOMEIP` | Disabilita il transport vSomeIP | `false` |
-| `PACOM_VSOMEIP_ROLE` | Forza il ruolo vSomeIP (`router`/`client`) | Auto-election |
+| volume `/tmp` | Directory IPC condivisa con il routing manager dell'host | obbligatorio tra container dello stesso host |
 | `PACOM_DEBUG_VERBOSE` | Log verbosi di pacom | `false` |
 
 ---

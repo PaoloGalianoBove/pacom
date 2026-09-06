@@ -22,9 +22,20 @@ You do not need to provide static `vsomeip.json` files anymore.
 
 - For different ECUs, keep different `UP_AUTHORITY` values.
 - Ensure UDP multicast for service discovery is allowed in your Docker network.
-- The ECU should have exactly one routing-manager process. By default pacom auto-elects the first application as router.
+- The ECU must run exactly one external `routingmanagerd`; PACOM applications are clients.
 
-## Docker build and run (Virtual Network Mode)
+## Docker build and run
+
+The maintained commands are in `docker/README.md` at the PACOM project root.
+From `pacom-develop`, run:
+
+```bash
+make docker-up SCENARIO=rtt TOPOLOGY=single-host
+make docker-up SCENARIO=rtt TOPOLOGY=multi-host
+```
+
+The commands below describe the former per-container virtual-network setup and
+are retained only as reference.
 
 ```bash
 # Create network (if not exists)

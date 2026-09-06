@@ -144,7 +144,7 @@ client.subscribe_event("/sensors/speed", |bytes| {
 
 ### vSomeIP (intra-vehicle)
 
-- **Auto role negotiation**: at startup, the SDK detects whether a vSomeIP routing manager is already active on the host (via Unix socket `/tmp/vsomeip-0`). If not, it atomically elects itself as the router using a lock file.
+- **External routing manager**: PACOM applications are deterministic clients of one `routingmanagerd` process per host and share its IPC directory.
 - **Auto IP detection**: uses a zero-packet UDP routing lookup to discover the correct network interface IP without any configuration.
 - **Dynamic JSON config**: generates the vSomeIP configuration file at runtime (no hardcoded JSON templates).
 
@@ -165,7 +165,8 @@ LIB=$(find /workspaces/pacom-develop/pacom/target -name libvsomeip3.so.3 2>/dev/
 echo "$LIB" | sudo tee /etc/ld.so.conf.d/vsomeip3.conf && sudo ldconfig
 ```
 
-From that point, server and client can be started using `cargo run`:
+From that point, start a configured `routingmanagerd` before server and client.
+The repeatable Docker topologies are documented in `pacom/docker/README.md`.
 
 ```bash
 # Terminal 1 — Server

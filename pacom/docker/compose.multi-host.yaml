@@ -1,0 +1,98 @@
+name: pacom-${PACOM_SCENARIO:-rtt}-multi-host
+
+x-router-common: &router-common
+  image: pacom-demo:latest
+  user: "0:0"
+  entrypoint: ["/opt/pacom/docker/router-entrypoint.sh"]
+  networks: [pacom-net]
+  healthcheck:
+    test: ["CMD-SHELL", "test -S /tmp/vsomeip-0"]
+    interval: 1s
+    timeout: 1s
+    retries: 15
+
+x-app-common: &app-common
+  image: pacom-demo:latest
+  entrypoint: ["/opt/pacom/docker/entrypoint.sh"]
+  stdin_open: true
+  tty: true
+
+services:
+  router-a:
+    <<: *router-common
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      PACOM_VSOMEIP_NODE_UE_IDS: "${APP_A_UE_ID},${APP_B_UE_ID}"
+    volumes:
+      - ipc-a:/tmp
+
+  app-a:
+    <<: *app-common
+    network_mode: "service:router-a"
+    environment:
+      APP_BIN: "${APP_A_BIN}"
+      UP_AUTHORITY: "${APP_A_AUTHORITY}"
+      UP_UE_ID: "${APP_A_UE_ID}"
+      PACOM_MANIFEST_PATH: "${APP_A_MANIFEST}"
+      PACOM_MQTT_BROKER_URI: mqtt://mosquitto:1883
+      PACOM_CLOUD_AUTHORITY: cloud.bridge
+    volumes:
+      - ipc-a:/tmp
+    depends_on:
+      router-a:
+        condition: service_healthy
+
+  router-b:
+    <<: *router-common
+    environment:
+      PACOM_VSOMEIP_NODE_UE_IDS: "${APP_A_UE_ID},${APP_B_UE_ID}"
+    volumes:
+      - ipc-b:/tmp
+
+  app-b:
+    <<: *app-common
+    network_mode: "service:router-b"
+    environment:
+      APP_BIN: "${APP_B_BIN}"
+      UP_AUTHORITY: "${APP_B_AUTHORITY}"
+      UP_UE_ID: "${APP_B_UE_ID}"
+      PACOM_MANIFEST_PATH: "${APP_B_MANIFEST}"
+      PACOM_RTT_OUTPUT_PATH: /results/rtt_measurements_multi_host.csv
+    volumes:
+      - ipc-b:/tmp
+      - ../../results:/results
+    depends_on:
+      router-b:
+        condition: service_healthy
+
+  mosquitto:
+    image: eclipse-mosquitto:1.6
+    profiles: ["mqtt"]
+    networks: [pacom-net]
+
+  cloud-app:
+    image: pacom-demo:latest
+    profiles: ["mqtt"]
+    entrypoint: ["/opt/pacom/docker/entrypoint.sh"]
+    networks: [pacom-net]
+    stdin_open: true
+    tty: true
+    environment:
+      APP_BIN: cloud_app
+      UP_AUTHORITY: cloud.bridge
+      UP_UE_ID: "0x2200"
+      PACOM_MANIFEST_PATH: /opt/pacom/examples/mqtt_bridge/cloud-app/manifest.json
+      PACOM_MQTT_BROKER_URI: mqtt://mosquitto:1883
+      PACOM_CLOUD_AUTHORITY: cloud.bridge
+      PACOM_DISABLE_VSOMEIP: "true"
+    depends_on:
+      - mosquitto
+
+networks:
+  pacom-net:
+
+volumes:
+  ipc-a:
+  ipc-b:
