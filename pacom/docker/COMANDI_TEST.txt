@@ -1,0 +1,180 @@
+COMANDI TEST PACOM - DOCKER
+============================
+
+Eseguire tutti i comandi dalla root del repository:
+
+cd ~/u-protocol/pacom-develop
+
+Ogni comando docker-attach va eseguito in un terminale separato.
+Per scollegarsi da un container senza fermarlo: Ctrl-P, poi Ctrl-Q.
+
+Prima esecuzione, oppure dopo modifiche al codice PACOM:
+
+make docker-build SCENARIO=mqtt-bridge TOPOLOGY=single-host
+
+La stessa immagine pacom-demo:latest viene usata da tutti gli scenari e da
+entrambe le topologie. Le successive esecuzioni di docker-up non ricompilano.
+
+In alternativa, per ricostruire e avviare insieme:
+
+make docker-up-build SCENARIO=mqtt-bridge TOPOLOGY=single-host
+
+
+1. MQTT BRIDGE - SINGLE HOST
+============================
+
+Avvio:
+
+make docker-up SCENARIO=mqtt-bridge TOPOLOGY=single-host
+
+Terminale Light Switch:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=single-host SERVICE=app-a
+
+Terminale Dashboard:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=single-host SERVICE=app-b
+
+Terminale Cloud App:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=single-host SERVICE=cloud-app
+
+Log complessivi opzionali:
+
+make docker-logs SCENARIO=mqtt-bridge TOPOLOGY=single-host
+
+Arresto e pulizia:
+
+make docker-down SCENARIO=mqtt-bridge TOPOLOGY=single-host
+
+
+2. MQTT BRIDGE - MULTI HOST
+===========================
+
+Avvio:
+
+make docker-up SCENARIO=mqtt-bridge TOPOLOGY=multi-host
+
+Terminale Light Switch:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=multi-host SERVICE=app-a
+
+Terminale Dashboard:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=multi-host SERVICE=app-b
+
+Terminale Cloud App:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=multi-host SERVICE=cloud-app
+
+Log complessivi opzionali:
+
+make docker-logs SCENARIO=mqtt-bridge TOPOLOGY=multi-host
+
+Arresto e pulizia:
+
+make docker-down SCENARIO=mqtt-bridge TOPOLOGY=multi-host
+
+
+3. RTT - SINGLE HOST
+====================
+
+Avvio:
+
+make docker-up SCENARIO=rtt TOPOLOGY=single-host
+
+Terminale Server RTT:
+
+make docker-attach SCENARIO=rtt TOPOLOGY=single-host SERVICE=app-a
+
+Terminale Client RTT:
+
+make docker-attach SCENARIO=rtt TOPOLOGY=single-host SERVICE=app-b
+
+Il client termina automaticamente al termine del benchmark.
+Per recuperare i log dopo la sua terminazione:
+
+make docker-output SCENARIO=rtt TOPOLOGY=single-host SERVICE=app-b
+
+Controllo CSV:
+
+ls -lh results/rtt_measurements_single_host.csv
+
+Arresto e pulizia:
+
+make docker-down SCENARIO=rtt TOPOLOGY=single-host
+
+
+4. RTT - MULTI HOST
+===================
+
+Avvio:
+
+make docker-up SCENARIO=rtt TOPOLOGY=multi-host
+
+Terminale Server RTT:
+
+make docker-attach SCENARIO=rtt TOPOLOGY=multi-host SERVICE=app-a
+
+Terminale Client RTT:
+
+make docker-attach SCENARIO=rtt TOPOLOGY=multi-host SERVICE=app-b
+
+Il client termina automaticamente al termine del benchmark.
+Per recuperare i log dopo la sua terminazione:
+
+make docker-output SCENARIO=rtt TOPOLOGY=multi-host SERVICE=app-b
+
+Controllo CSV:
+
+ls -lh results/rtt_measurements_multi_host.csv
+
+Arresto e pulizia:
+
+make docker-down SCENARIO=rtt TOPOLOGY=multi-host
+
+
+5. MQTT BRIDGE - TOPOLOGIA IBRIDA 2+1
+=====================================
+
+La topologia usa:
+
+Host simulato A:
+- app-a: Light Switch, UE 0x3301
+- app-c: Dashboard locale, UE 0x1245
+- router-a conosce soltanto 0x3301 e 0x1245
+
+Host simulato B:
+- app-b: Dashboard remoto, UE 0x1234
+- router-b conosce soltanto 0x1234
+
+Avvio:
+
+make docker-up SCENARIO=mqtt-bridge TOPOLOGY=hybrid-host
+
+Terminale Light Switch:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=hybrid-host SERVICE=app-a
+
+Terminale Dashboard locale, stesso host del Light Switch:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=hybrid-host SERVICE=app-c
+
+Terminale Dashboard remoto, host differente:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=hybrid-host SERVICE=app-b
+
+Terminale Cloud App:
+
+make docker-attach SCENARIO=mqtt-bridge TOPOLOGY=hybrid-host SERVICE=cloud-app
+
+Entrambi i dashboard devono poter comandare il Light Switch. Il dashboard
+locale usa IPC; quello remoto trova il servizio tramite SOME/IP-SD e usa TCP.
+
+Per osservare soltanto il traffico SOME/IP remoto:
+
+sudo tcpdump -ni any 'tcp port 30508 or tcp port 30511'
+
+Arresto e pulizia:
+
+make docker-down SCENARIO=mqtt-bridge TOPOLOGY=hybrid-host

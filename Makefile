@@ -6,7 +6,7 @@ PROFILE_ARGS := $(if $(filter mqtt-bridge,$(SCENARIO)),--profile mqtt,)
 COMPOSE := docker compose $(PROFILE_ARGS) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 SERVICE ?= app-b
 
-.PHONY: docker-build docker-up docker-down docker-ps docker-logs docker-output docker-attach docker-config docker-rebuild
+.PHONY: docker-build docker-up docker-up-build docker-down docker-ps docker-logs docker-output docker-attach docker-config docker-rebuild
 
 docker-config:
 	@test -f "$(ENV_FILE)" || (echo "Unknown scenario: $(SCENARIO)" >&2; exit 2)
@@ -18,6 +18,9 @@ docker-build: docker-config
 	$(COMPOSE) build
 
 docker-up: docker-config
+	$(COMPOSE) up --detach --remove-orphans
+
+docker-up-build: docker-config
 	$(COMPOSE) up --detach --build --remove-orphans
 
 docker-down:

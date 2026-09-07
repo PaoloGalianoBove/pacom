@@ -60,16 +60,24 @@ make docker-down SCENARIO=mqtt-bridge TOPOLOGY=multi-host
 
 ## Build cache
 
-`make docker-up` uses `docker compose up --build`. Docker checks the existing
-layers and recompiles only when a relevant build input changed. The dependency
-layer is keyed by `Cargo.toml` and `Cargo.lock`, while application sources are
-copied afterward. Do not use `--no-cache` for normal development.
+`make docker-up` starts the existing image without requesting a rebuild. Build
+the image explicitly before the first run:
 
 Build explicitly without starting containers:
 
 ```bash
 make docker-build SCENARIO=rtt TOPOLOGY=single-host
 ```
+
+After changing PACOM source code, rebuild and start in one command:
+
+```bash
+make docker-up-build SCENARIO=rtt TOPOLOGY=single-host
+```
+
+Docker reuses cached dependency layers when possible. The dependency layer is
+keyed by `Cargo.toml` and `Cargo.lock`, while application sources are copied
+afterward. Do not use `--no-cache` for normal development.
 
 Use `make docker-rebuild` only when a genuinely clean image is required.
 
