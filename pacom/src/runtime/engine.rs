@@ -450,11 +450,20 @@ impl RuntimeEngine {
             ),
         );
 
-        // 2. Set up the local vSomeIP transport (Router or Client) if not disabled
-        let vsomeip_transport = if std::env::var("PACOM_DISABLE_VSOMEIP")
+        let vsomeip_enabled = std::env::var("PACOM_DISABLE_VSOMEIP")
             .unwrap_or_else(|_| "false".to_string())
-            != "true"
-        {
+            != "true";
+        let has_rpc_capabilities =
+            !manifest.rpc.provide.is_empty() || !manifest.rpc.consume.is_empty();
+        if !vsomeip_enabled && has_rpc_capabilities {
+            return Err(PacomError::Config(
+                "RPC capabilities require the vSomeIP transport; remove PACOM_DISABLE_VSOMEIP=true or remove rpc.provide/rpc.consume from the manifest"
+                    .to_string(),
+            ));
+        }
+
+        // 2. Set up the local vSomeIP transport (Router or Client) if not disabled
+        let vsomeip_transport = if vsomeip_enabled {
             Some(vsomeip::setup_vsomeip_transport(ue_id, &authority).await?)
         } else {
             None
