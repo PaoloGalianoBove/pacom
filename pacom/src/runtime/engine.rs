@@ -957,6 +957,7 @@ impl RuntimeEngine {
         &self,
         service_name: &str,
         payload: Vec<u8>,
+        options: Option<crate::RpcOptions>,
     ) -> Result<Vec<u8>, PacomError> {
         if !self.manifest.is_rpc_consumed(service_name) {
             return Err(PacomError::ManifestViolation {
@@ -965,7 +966,8 @@ impl RuntimeEngine {
             });
         }
 
-        let info = self.resolve_rpc_provider_with_retry(service_name).await?;
+        let custom_discovery_timeout = options.as_ref().and_then(|o| o.discovery_timeout_ms);
+        let info = self.resolve_rpc_provider_with_retry(service_name, custom_discovery_timeout).await?;
 
         let method_uri = UUri::try_from_parts(
             &info.authority,
@@ -976,7 +978,12 @@ impl RuntimeEngine {
         .map_err(|e| PacomError::Config(format!("Invalid method URI: {e:?}")))?;
 
         let payload_obj = UPayload::new(payload, UPayloadFormat::UPAYLOAD_FORMAT_RAW);
-        let call_options = CallOptions::for_rpc_request(rpc_timeout_ms(), None, None, None);
+        
+        let call_timeout = options
+            .as_ref()
+            .and_then(|o| o.call_timeout_ms)
+            .unwrap_or_else(rpc_timeout_ms);
+        let call_options = CallOptions::for_rpc_request(call_timeout, None, None, None);
 
         let rpc_client = self.rpc_client.as_ref().ok_or_else(|| {
             PacomError::Config(
@@ -987,7 +994,19 @@ impl RuntimeEngine {
         let response = rpc_client
             .invoke_method(method_uri, call_options, Some(payload_obj))
             .await
-            .map_err(|e| PacomError::RpcError(format!("RPC invocation failed: {e:?}")))?;
+            .map_err(|e| match e {
+                up_rust::communication::ServiceInvocationError::DeadlineExceeded => {
+                    PacomError::RpcTimeout {
+                        name: service_name.to_string(),
+                        timeout_ms: call_timeout,
+                    }
+                }
+                _ => PacomError::RpcError {
+                    name: service_name.to_string(),
+                    timeout_ms: call_timeout,
+                    message: format!("{:?}", e),
+                },
+            })?;
 
         match response {
             Some(p) => Ok(p.payload().to_vec()),
@@ -1039,6 +1058,7 @@ impl RuntimeEngine {
     async fn resolve_rpc_provider_with_retry(
         &self,
         service_name: &str,
+        custom_timeout_ms: Option<u64>,
     ) -> Result<ProviderInfo, PacomError> {
         if let Some(info) = self.lookup_rpc_provider(service_name)? {
             dbg_log(
@@ -1052,7 +1072,9 @@ impl RuntimeEngine {
             return Ok(info);
         }
 
-        let timeout = rpc_provider_discovery_timeout();
+        let timeout = custom_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or_else(rpc_provider_discovery_timeout);
         let poll = rpc_provider_discovery_poll_interval();
         let deadline = Instant::now() + timeout;
         let mut attempts: u64 = 0;
@@ -1117,7 +1139,7 @@ fn rpc_provider_discovery_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis)
-        .unwrap_or(Duration::from_millis(180_000))
+        .unwrap_or(Duration::from_millis(5_000))
 }
 
 //Time I wait for an RPC response before giving up when I know the provider.

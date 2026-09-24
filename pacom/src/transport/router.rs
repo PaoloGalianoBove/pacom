@@ -295,7 +295,7 @@ impl UTransport for PacomRouter {
 
             if let Some(ref v) = self.vsomeip {
                 trace!("[Router] Broadcasting Publish to local vSomeIP transport");
-                let mut vsomeip_msg = message;
+                let vsomeip_msg = message;
                 if let Some(source) = vsomeip_msg.attributes.source.as_ref().cloned() {
                     dbg_log(
                         "Router",

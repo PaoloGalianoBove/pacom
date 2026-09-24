@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
-    println!("[DASHBOARD] Inizializzazione runtime (solo locale SOME/IP)...");
+    println!("[DASHBOARD] Initializing runtime (SOME/IP local only)...");
     let runtime = Arc::new(
         PacomRuntime::new(RuntimeConfig {
             mqtt_config: None,
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .await?;
-    println!("[DASHBOARD] Subscribe stato locale abilitata.");
+    println!("[DASHBOARD] Local status subscription enabled.");
 
     // Stampa iniziale del menu
     {
@@ -74,17 +74,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(cmd_str) = cmd {
             println!(
-                "[DASHBOARD] Invio comando RPC '{}' a light_switch...",
+                "[DASHBOARD] Sending RPC command '{}' to light_switch...",
                 cmd_str
             );
             match runtime
-                .invoke_rpc_method(RPC_SET_LIGHTS, cmd_str.as_bytes().to_vec())
+                .invoke_rpc_method(RPC_SET_LIGHTS, cmd_str.as_bytes().to_vec(), None)
                 .await
             {
                 Ok(resp) => {
                     let confirmed_status = String::from_utf8_lossy(&resp).into_owned();
                     println!(
-                        "[DASHBOARD] Risposta RPC da light_switch: Stato impostato a '{}'",
+                        "[DASHBOARD] RPC response from light_switch: Status set to '{}'",
                         confirmed_status
                     );
                     if let Ok(mut lock) = current_status.write() {
@@ -92,15 +92,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     print_menu(&confirmed_status);
                 }
+                Err(pacom::PacomError::DiscoveryTimeout { name, timeout_ms }) => {
+                    eprintln!(
+                        "[DASHBOARD - RPC ERROR DISCOVERY] No provider discovered for '{}' within {}ms",
+                        name, timeout_ms
+                    );
+                }
+                Err(pacom::PacomError::RpcTimeout { name, timeout_ms }) => {
+                    eprintln!(
+                        "[DASHBOARD - RPC ERROR TIMEOUT] No response received for '{}' within {}ms",
+                        name, timeout_ms
+                    );
+                }
+                Err(pacom::PacomError::RpcError { name, timeout_ms, message }) => {
+                    eprintln!(
+                        "[DASHBOARD - RPC ERROR SYSTEM] Invocation failed for '{}' within {}ms: {}",
+                        name, timeout_ms, message
+                    );
+                }
                 Err(e) => {
                     eprintln!(
-                        "[DASHBOARD - ERRORE RPC] Impossibile inviare comando: {}",
+                        "[DASHBOARD - RPC ERROR] Failed to send command: {}",
                         e
                     );
                 }
             }
         } else {
-            println!("Opzione non valida. Inserisci 0, 1 o 2 (o '/quit' per uscire).");
+            println!("Invalid option. Enter 0, 1 or 2 (or '/quit' to exit).");
         }
     }
 
@@ -114,7 +132,7 @@ fn print_menu(status: &str) {
     println!("1. Low beam");
     println!("2. High Beam");
     println!("====================================");
-    print!("Scegli un'opzione (0-2 o '/quit'): ");
+    print!("Choose an option (0-2 or '/quit'): ");
     use std::io::Write;
     let _ = std::io::stdout().flush();
 }

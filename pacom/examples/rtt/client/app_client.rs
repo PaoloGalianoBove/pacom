@@ -25,7 +25,7 @@ impl RttClientApp {
         for _ in 0..count {
             let _ = self
                 .runtime
-                .invoke_rpc_method(method, b"warmup".to_vec())
+                .invoke_rpc_method(method, b"warmup".to_vec(), None)
                 .await;
         }
     }
@@ -36,7 +36,7 @@ impl RttClientApp {
         payload: Vec<u8>,
     ) -> (f64, Result<Vec<u8>, pacom::PacomError>) {
         let start = Instant::now();
-        let result = self.runtime.invoke_rpc_method(method, payload).await;
+        let result = self.runtime.invoke_rpc_method(method, payload, None).await;
         let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
         (rtt_ms, result)
     }

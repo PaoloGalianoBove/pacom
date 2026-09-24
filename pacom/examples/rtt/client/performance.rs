@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::thread;
@@ -104,22 +104,36 @@ impl PerformanceSampler {
     }
 }
 
-pub fn write_rtt_file(
-    filename: &str,
-    measurements: &[(usize, f64, String, ResourceSnapshot)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = File::create(filename)?;
+pub struct RttMeasurementWriter {
+    file: BufWriter<File>,
+    filename: String,
+}
 
-    writeln!(
-        file,
-        "iteration,rtt_ms,status,proc_ram_mb,proc_vsz_mb,proc_cpu_pct,sys_ram_pct,sys_cpu_pct"
-    )?;
-
-    for (iter, rtt_ms, status, snapshot) in measurements {
+impl RttMeasurementWriter {
+    pub fn create(filename: &str) -> Result<Self, std::io::Error> {
+        let mut file = BufWriter::new(File::create(filename)?);
         writeln!(
             file,
+            "iteration,rtt_ms,status,proc_ram_mb,proc_vsz_mb,proc_cpu_pct,sys_ram_pct,sys_cpu_pct"
+        )?;
+
+        Ok(Self {
+            file,
+            filename: filename.to_string(),
+        })
+    }
+
+    pub fn write(
+        &mut self,
+        iteration: usize,
+        rtt_ms: f64,
+        status: &str,
+        snapshot: ResourceSnapshot,
+    ) -> Result<(), std::io::Error> {
+        writeln!(
+            self.file,
             "{},{:.3},{},{:.3},{:.3},{:.1},{:.1},{:.1}",
-            iter,
+            iteration,
             rtt_ms,
             status,
             snapshot.proc_ram_mb,
@@ -127,9 +141,12 @@ pub fn write_rtt_file(
             snapshot.proc_cpu_pct,
             snapshot.sys_ram_pct,
             snapshot.sys_cpu_pct
-        )?;
+        )
     }
 
-    println!("[CLIENT] RTT measurements written to {}", filename);
-    Ok(())
+    pub fn finish(mut self) -> Result<(), std::io::Error> {
+        self.file.flush()?;
+        println!("[CLIENT] RTT measurements written to {}", self.filename);
+        Ok(())
+    }
 }

@@ -67,6 +67,7 @@ impl PacomRuntime {
     }
 
     /// Invokes a remote procedure call (RPC) method and waits for the response.
+    /// Options for an RPC invocation, allowing fine-grained control over timeouts.
     ///
     /// The method must be declared in the `rpc.consume` section of the manifest.
     /// If no provider is discovered, this method will wait up to the discovery timeout.
@@ -74,8 +75,9 @@ impl PacomRuntime {
         &self,
         logical_method: &str,
         payload: Vec<u8>,
+        options: Option<crate::RpcOptions>,
     ) -> Result<Vec<u8>, PacomError> {
-        self.inner.call_rpc(logical_method, payload).await
+        self.inner.call_rpc(logical_method, payload, options).await
     }
 
     /// Gracefully stops PACOM background tasks.

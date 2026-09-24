@@ -47,9 +47,25 @@ pub enum PacomError {
     #[error("RPC returned empty response")]
     EmptyResponse,
 
+    /// An RPC response was not received within the configured timeout.
+    #[error("RPC timeout: no response received for '{name}' within {timeout_ms}ms")]
+    RpcTimeout {
+        /// The logical name of the method.
+        name: String,
+        /// The timeout duration configured for this call.
+        timeout_ms: u32,
+    },
+
     /// An RPC invocation failed at runtime.
-    #[error("RPC error: {0}")]
-    RpcError(String),
+    #[error("RPC system error: invocation failed for '{name}' within {timeout_ms}ms: {message}")]
+    RpcError {
+        /// The logical name of the method.
+        name: String,
+        /// The timeout duration configured for this call.
+        timeout_ms: u32,
+        /// The underlying error message (e.g., from uProtocol).
+        message: String,
+    },
 }
 
 impl From<PacomError> for UStatus {
@@ -69,7 +85,10 @@ impl From<PacomError> for UStatus {
             PacomError::EmptyResponse => {
                 UStatus::fail_with_code(UCode::NOT_FOUND, error.to_string())
             }
-            PacomError::RpcError(_) => {
+            PacomError::RpcTimeout { .. } => {
+                UStatus::fail_with_code(UCode::DEADLINE_EXCEEDED, error.to_string())
+            }
+            PacomError::RpcError { .. } => {
                 UStatus::fail_with_code(UCode::UNAVAILABLE, error.to_string())
             }
         }

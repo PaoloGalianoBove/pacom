@@ -36,6 +36,8 @@ services:
       UP_AUTHORITY: "${APP_A_AUTHORITY}"
       UP_UE_ID: "${APP_A_UE_ID}"
       PACOM_MANIFEST_PATH: "${APP_A_MANIFEST}"
+      PACOM_DISCOVERY_MAX_WAIT_MS: "1000"
+      PACOM_RPC_TIMEOUT_MS: "500"
       PACOM_MQTT_BROKER_URI: mqtt://mosquitto:1883
       PACOM_CLOUD_AUTHORITY: cloud.bridge
     volumes:
@@ -59,6 +61,8 @@ services:
       UP_AUTHORITY: "${APP_B_AUTHORITY}"
       UP_UE_ID: "${APP_B_UE_ID}"
       PACOM_MANIFEST_PATH: "${APP_B_MANIFEST}"
+      PACOM_DISCOVERY_MAX_WAIT_MS: "1000"
+      PACOM_RPC_TIMEOUT_MS: "500"
       PACOM_RTT_OUTPUT_PATH: /results/rtt_measurements_multi_host.csv
     volumes:
       - ipc-b:/tmp

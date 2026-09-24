@@ -2,7 +2,7 @@ mod app_client;
 mod performance;
 
 use app_client::RttClientApp;
-use performance::{PerformanceSampler, write_rtt_file};
+use performance::{PerformanceSampler, RttMeasurementWriter};
 
 const NUM_REQUESTS: usize = 10_000;
 const WARMUP_REQUESTS: usize = 10;
@@ -29,7 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.warm_up(RPC_METHOD, WARMUP_REQUESTS).await;
     println!("[CLIENT] Warm-up complete. Starting benchmark...");
 
-    let mut rtt_measurements = Vec::with_capacity(NUM_REQUESTS);
+    let output_file = std::env::var("PACOM_RTT_OUTPUT_PATH")
+        .unwrap_or_else(|_| DEFAULT_RTT_OUTPUT_FILE.to_string());
+    let mut measurement_writer = RttMeasurementWriter::create(&output_file)?;
 
     for i in 0..NUM_REQUESTS {
         let snapshot = sampler.snapshot();
@@ -44,18 +46,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         i, rtt_ms, snapshot.proc_cpu_pct
                     );
                 }
-                rtt_measurements.push((i, rtt_ms, "ok".to_string(), snapshot));
+                measurement_writer.write(i, rtt_ms, "ok", snapshot)?;
             }
             Err(e) => {
                 eprintln!("[CLIENT] iteration {}: invoke error: {}", i, e);
-                rtt_measurements.push((i, rtt_ms, format!("invoke_error: {}", e), snapshot));
+                measurement_writer.write(
+                    i,
+                    rtt_ms,
+                    &format!("invoke_error: {}", e),
+                    snapshot,
+                )?;
             }
         }
     }
 
-    let output_file = std::env::var("PACOM_RTT_OUTPUT_PATH")
-        .unwrap_or_else(|_| DEFAULT_RTT_OUTPUT_FILE.to_string());
-    write_rtt_file(&output_file, &rtt_measurements)?;
+    measurement_writer.finish()?;
 
     Ok(())
 }

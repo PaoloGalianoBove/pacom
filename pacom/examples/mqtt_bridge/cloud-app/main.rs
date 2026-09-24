@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let broker_uri = std::env::var("PACOM_MQTT_BROKER_URI")
         .unwrap_or_else(|_| "mqtt://127.0.0.1:1883".to_string());
 
-    println!("[CLOUD_APP] Inizializzazione runtime (connessione a MQTT)...");
+    println!("[CLOUD_APP] Initializing runtime (MQTT connection)...");
     let runtime = Arc::new(
         PacomRuntime::new(RuntimeConfig {
             mqtt_config: Some(MqttConfig {
@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime
         .subscribe_event(TOPIC_CLOUD_TELEMETRY, |payload| async move {
             let status = String::from_utf8_lossy(&payload);
-            println!("\n[CLOUD - TELEMETRIA] Stato luci veicolo: {}", status);
+            println!("\n[CLOUD - TELEMETRY] Vehicle lights status: {}", status);
             print_menu();
         })
         .await?;
@@ -62,15 +62,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         if let Some(cmd_str) = cmd {
-            println!("[CLOUD] Invio comando '{}' via MQTT...", cmd_str);
+            println!("[CLOUD] Sending command '{}' via MQTT...", cmd_str);
             if let Err(e) = runtime
                 .publish_event(TOPIC_CLOUD_COMMAND, cmd_str.as_bytes().to_vec())
                 .await
             {
-                eprintln!("[CLOUD - ERRORE MQTT] Invio comando fallito: {}", e);
+                eprintln!("[CLOUD - MQTT ERROR] Failed to send command: {}", e);
             }
         } else {
-            println!("Opzione non valida. Inserisci 0, 1 o 2 (o '/quit' per uscire).");
+            println!("Invalid option. Enter 0, 1 or 2 (or '/quit' to exit).");
         }
     }
 
@@ -79,12 +79,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_menu() {
     println!("\n====================================");
-    println!("[CLOUD] Invio comandi MQTT:");
+    println!("[CLOUD] Send MQTT commands:");
     println!("0. Lights off");
     println!("1. Low beam");
     println!("2. High Beam");
     println!("====================================");
-    print!("Scegli un'opzione (0-2 o '/quit'): ");
+    print!("Choose an option (0-2 or '/quit'): ");
     use std::io::Write;
     let _ = std::io::stdout().flush();
 }

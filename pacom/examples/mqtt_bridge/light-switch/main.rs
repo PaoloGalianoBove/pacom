@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "mqtt://127.0.0.1:1883".to_string());
 
     println!(
-        "[LIGHT_SWITCH] Tentativo di connessione al broker MQTT in {}...",
+        "[LIGHT_SWITCH] Attempting to connect to MQTT broker at {}...",
         broker_uri
     );
 
@@ -39,12 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     {
         Ok(rt) => {
-            println!("[LIGHT_SWITCH] Connessione a MQTT riuscita. Nodi veicolo e cloud pronti.");
+            println!("[LIGHT_SWITCH] Successfully connected to MQTT. Vehicle and cloud nodes ready.");
             Arc::new(rt)
         }
         Err(e) => {
             println!(
-                "[WARNING - MQTT] Broker MQTT non raggiungibile ({e}). Avvio in modalità solo-veicolo locale (SOME/IP)..."
+                "[WARNING - MQTT] Unreachable MQTT broker ({e}). Starting in local vehicle-only mode (SOME/IP)..."
             );
             let rt = PacomRuntime::new(RuntimeConfig {
                 mqtt_config: None,
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let runtime_clone = runtime_clone.clone();
             async move {
                 let cmd = String::from_utf8_lossy(&payload).into_owned();
-                println!("[HMI ➔ SOME/IP] Ricevuto comando RPC: '{}'", cmd);
+                println!("[HMI ➔ SOME/IP] Received RPC command: '{}'", cmd);
 
                 let _ = runtime_clone
                     .publish_event(TOPIC_CLOUD_TELEMETRY, cmd.as_bytes().to_vec())
@@ -85,9 +85,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let runtime_clone = runtime_clone.clone();
             async move {
                 let cmd = String::from_utf8_lossy(&payload).into_owned();
-                println!("[CLOUD ➔ MQTT] Ricevuto comando dal Cloud: '{}'", cmd);
+                println!("[CLOUD ➔ MQTT] Received command from Cloud: '{}'", cmd);
                 println!(
-                    "[CLOUD ➔ MQTT] Comando Cloud '{}' applicato con successo.",
+                    "[CLOUD ➔ MQTT] Cloud command '{}' applied successfully.",
                     cmd
                 );
 
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if status.code.enum_value_or_default() == UCode::UNAVAILABLE =>
         {
             println!(
-                "[WARNING - MQTT] Subscribe cloud non disponibile ({}). Continuo in modalita solo locale.",
+                "[WARNING - MQTT] Cloud subscription unavailable ({}). Proceeding in local-only mode.",
                 status
                     .message
                     .clone()
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pubblica lo stato iniziale per registrarlo nel Service Discovery.
     let _ = runtime.publish_event(TOPIC_STATUS, b"Off".to_vec()).await;
 
-    println!("[LIGHT_SWITCH] In attesa di comandi HMI (RPC) o Cloud (MQTT)...");
+    println!("[LIGHT_SWITCH] Waiting for HMI (RPC) or Cloud (MQTT) commands...");
 
     // Tieni in vita il thread principale
     std::thread::park();
