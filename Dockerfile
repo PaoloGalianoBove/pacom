@@ -95,6 +95,7 @@ RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
     cp "${PACOM_DIR}/target/release/examples/light_switch" /opt/pacom/bin/light_switch && \
     cp "${PACOM_DIR}/target/release/examples/light_dashboard" /opt/pacom/bin/light_dashboard && \
     cp "${PACOM_DIR}/target/release/examples/cloud_app" /opt/pacom/bin/cloud_app && \
+    cp "${PACOM_DIR}/target/release/examples/light_ecu" /opt/pacom/bin/light_ecu || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox" /opt/pacom/bin/birthday_paradox || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox_pub" /opt/pacom/bin/birthday_paradox_pub || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox_sub" /opt/pacom/bin/birthday_paradox_sub || true && \

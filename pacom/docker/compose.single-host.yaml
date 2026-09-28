@@ -77,5 +77,25 @@ services:
     depends_on:
       - mosquitto
 
+  databroker:
+    image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.6.0
+    command: ["--metadata", "/vss.json"]
+    network_mode: host
+    volumes:
+      - ./vss.json:/vss.json
+
+  app-ecu:
+    image: pacom-demo:latest
+    entrypoint: ["/opt/pacom/bin/light_ecu"]
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      APP_BIN: light_ecu
+      PACOM_DISABLE_VSOMEIP: "true"
+      PACOM_KUKSA_URI: http://127.0.0.1:55555
+    depends_on:
+      - databroker
+
 volumes:
   ipc-single:

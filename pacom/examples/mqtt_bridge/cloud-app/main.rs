@@ -55,9 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let cmd = match text {
-            "0" => Some("Off"),
-            "1" => Some("Low Beam"),
-            "2" => Some("High Beam"),
+            "0" => Some("All Off"),
+            "1" => Some("Low Beam On"),
+            "2" => Some("Low Beam Off"),
+            "3" => Some("High Beam On"),
+            "4" => Some("High Beam Off"),
             _ => None,
         };
 
@@ -70,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[CLOUD - MQTT ERROR] Failed to send command: {}", e);
             }
         } else {
-            println!("Invalid option. Enter 0, 1 or 2 (or '/quit' to exit).");
+            println!("Invalid option. Enter 0-4 (or '/quit' to exit).");
         }
     }
 
@@ -80,11 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn print_menu() {
     println!("\n====================================");
     println!("[CLOUD] Send MQTT commands:");
-    println!("0. Lights off");
-    println!("1. Low beam");
-    println!("2. High Beam");
+    println!("0. All Off");
+    println!("1. Low Beam On");
+    println!("2. Low Beam Off");
+    println!("3. High Beam On");
+    println!("4. High Beam Off");
     println!("====================================");
-    print!("Choose an option (0-2 or '/quit'): ");
+    print!("Choose an option (0-4 or '/quit'): ");
     use std::io::Write;
     let _ = std::io::stdout().flush();
 }

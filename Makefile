@@ -32,6 +32,9 @@ docker-ps:
 docker-logs:
 	$(COMPOSE) logs --follow
 
+docker-log-service:
+	$(COMPOSE) logs --follow $(SERVICE)
+
 docker-output:
 	$(COMPOSE) logs $(SERVICE)
 

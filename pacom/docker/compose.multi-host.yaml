@@ -40,6 +40,7 @@ services:
       PACOM_RPC_TIMEOUT_MS: "500"
       PACOM_MQTT_BROKER_URI: mqtt://mosquitto:1883
       PACOM_CLOUD_AUTHORITY: cloud.bridge
+      PACOM_KUKSA_URI: http://databroker:55555
     volumes:
       - ipc-a:/tmp
     depends_on:
@@ -93,6 +94,28 @@ services:
       PACOM_DISABLE_VSOMEIP: "true"
     depends_on:
       - mosquitto
+
+  databroker:
+    image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.6.0
+    command: ["--metadata", "/vss.json"]
+    networks: [pacom-net]
+    ports:
+      - "55555:55555"
+    volumes:
+      - ./vss.json:/vss.json
+
+  app-ecu:
+    image: pacom-demo:latest
+    entrypoint: ["/opt/pacom/bin/light_ecu"]
+    networks: [pacom-net]
+    stdin_open: true
+    tty: true
+    environment:
+      APP_BIN: light_ecu
+      PACOM_DISABLE_VSOMEIP: "true"
+      PACOM_KUKSA_URI: http://databroker:55555
+    depends_on:
+      - databroker
 
 networks:
   pacom-net:
