@@ -58,6 +58,8 @@ services:
     image: eclipse-mosquitto:1.6
     profiles: ["mqtt"]
     network_mode: host
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
 
   cloud-app:
     image: pacom-demo:latest
@@ -86,6 +88,7 @@ services:
 
   app-ecu:
     image: pacom-demo:latest
+    profiles: ["ecu"]
     entrypoint: ["/opt/pacom/bin/light_ecu"]
     network_mode: host
     stdin_open: true

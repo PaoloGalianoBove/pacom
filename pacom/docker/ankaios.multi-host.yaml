@@ -1,0 +1,147 @@
+                                                                                                                                                                                                                                                                                                                                                                                                                                    apiVersion: v1
+workloads:
+  pacom-router-a:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-router-a
+        - --pull=never
+        - --network=pacom-net
+        - --user=0:0
+        - --volume=pacom-ipc-a:/tmp
+        - --env=PACOM_VSOMEIP_NODE_UE_IDS=0x3301,0x1234
+        - --entrypoint=/opt/pacom/docker/router-entrypoint.sh
+  pacom-app-a:                                                          
+    agent: agent_A                                                                                                                                                                                                                                                                                                                                                                                            
+    runtime: podman
+    restartPolicy: ALWAYS
+    dependencies:                                                                                                                   
+      pacom-router-a: ADD_COND_RUNNING
+      pacom-mosquitto: ADD_COND_RUNNING
+      pacom-databroker: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --pull=never
+        - --network=container:pacom-router-a
+        - --volume=pacom-ipc-a:/tmp
+        - --interactive
+        - --tty
+        - --env=APP_BIN=light_switch
+        - --env=UP_AUTHORITY=ecu-switch
+        - --env=UP_UE_ID=0x3301
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/mqtt_bridge/light-switch/manifest.json
+        - --env=PACOM_DISCOVERY_MAX_WAIT_MS=1000
+        - --env=PACOM_RPC_TIMEOUT_MS=500
+        - --env=PACOM_MQTT_BROKER_URI=mqtt://mosquitto:1883
+        - --env=PACOM_CLOUD_AUTHORITY=cloud.bridge
+        - --env=PACOM_KUKSA_URI=http://databroker:55555
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until test -S /tmp/vsomeip-0 && (echo >/dev/tcp/mosquitto/1883) 2>/dev/null && (echo >/dev/tcp/databroker/55555) 2>/dev/null; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]
+  pacom-router-b:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-router-b
+        - --pull=never
+        - --network=pacom-net
+        - --user=0:0
+        - --volume=pacom-ipc-b:/tmp
+        - --env=PACOM_VSOMEIP_NODE_UE_IDS=0x3301,0x1234
+        - --entrypoint=/opt/pacom/docker/router-entrypoint.sh
+  pacom-app-b:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    dependencies:
+      pacom-router-b: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-app-b
+        - --pull=never
+        - --network=container:pacom-router-b
+        - --volume=pacom-ipc-b:/tmp
+        - --volume=pacom-results:/results
+        - --interactive
+        - --tty
+        - --env=APP_BIN=light_dashboard
+        - --env=UP_AUTHORITY=ecu-dashboard
+        - --env=UP_UE_ID=0x1234
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/mqtt_bridge/light-dashboard/manifest.json
+        - --env=PACOM_DISCOVERY_MAX_WAIT_MS=1000
+        - --env=PACOM_RPC_TIMEOUT_MS=500
+        - --env=PACOM_RTT_OUTPUT_PATH=/results/rtt_measurements_multi_host.csv
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until test -S /tmp/vsomeip-0; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]
+  pacom-mosquitto:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: docker.io/library/eclipse-mosquitto:1.6
+      commandOptions:
+        - --pull=never
+        - --network=pacom-net
+        - --network-alias=mosquitto
+        - --volume=/opt/pacom/ankaios/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+  pacom-cloud-app:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    dependencies:
+      pacom-mosquitto: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-cloud-app
+        - --pull=never
+        - --network=pacom-net
+        - --interactive
+        - --tty
+        - --env=APP_BIN=cloud_app
+        - --env=UP_AUTHORITY=cloud.bridge
+        - --env=UP_UE_ID=0x2200
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/mqtt_bridge/cloud-app/manifest.json
+        - --env=PACOM_MQTT_BROKER_URI=mqtt://mosquitto:1883
+        - --env=PACOM_CLOUD_AUTHORITY=cloud.bridge
+        - --env=PACOM_DISABLE_VSOMEIP=true
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until (echo >/dev/tcp/mosquitto/1883) 2>/dev/null; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]
+  pacom-databroker:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.6.0
+      commandOptions:
+        - --pull=never
+        - --network=pacom-net
+        - --network-alias=databroker
+        - --publish=55555:55555
+        - --volume=/opt/pacom/ankaios/vss.json:/vss.json:ro
+      commandArgs: ["--metadata", "/vss.json"]
+  pacom-app-ecu:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    dependencies:
+      pacom-databroker: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --pull=never
+        - --network=pacom-net
+        - --interactive
+        - --tty
+        - --env=APP_BIN=light_ecu
+        - --env=PACOM_DISABLE_VSOMEIP=true
+        - --env=PACOM_KUKSA_URI=http://databroker:55555
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until (echo >/dev/tcp/databroker/55555) 2>/dev/null; do sleep 1; done; exec /opt/pacom/bin/light_ecu"]

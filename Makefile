@@ -4,9 +4,10 @@ ENV_FILE := pacom/docker/env/$(SCENARIO).env
 COMPOSE_FILE := pacom/docker/compose.$(TOPOLOGY).yaml
 PROFILE_ARGS := $(if $(filter mqtt-bridge,$(SCENARIO)),--profile mqtt,)
 COMPOSE := docker compose $(PROFILE_ARGS) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
+PODMAN_COMPOSE := podman compose $(PROFILE_ARGS) --env-file $(ENV_FILE) -f $(COMPOSE_FILE)
 SERVICE ?= app-b
 
-.PHONY: docker-build docker-up docker-up-build docker-down docker-ps docker-logs docker-output docker-attach docker-config docker-rebuild
+.PHONY: docker-build docker-up docker-up-build docker-down docker-ps docker-logs docker-log-service docker-output docker-attach docker-config docker-rebuild podman-build podman-up podman-up-portable podman-up-build podman-down podman-ps podman-logs podman-log-service podman-output podman-attach podman-config podman-rebuild
 
 docker-config:
 	@test -f "$(ENV_FILE)" || (echo "Unknown scenario: $(SCENARIO)" >&2; exit 2)
@@ -48,3 +49,47 @@ docker-attach:
 
 docker-rebuild: docker-config
 	$(COMPOSE) build --no-cache
+
+podman-config:
+	@test -f "$(ENV_FILE)" || (echo "Unknown scenario: $(SCENARIO)" >&2; exit 2)
+	@test -f "$(COMPOSE_FILE)" || (echo "Unknown topology: $(TOPOLOGY)" >&2; exit 2)
+	@mkdir -p results
+	$(PODMAN_COMPOSE) config --quiet
+
+podman-build: podman-config
+	$(PODMAN_COMPOSE) build
+
+podman-up: podman-config
+	$(PODMAN_COMPOSE) up --detach --remove-orphans
+
+podman-up-portable: podman-config
+	$(PODMAN_COMPOSE) up --detach --no-build --pull never --remove-orphans
+
+podman-up-build: podman-config
+	$(PODMAN_COMPOSE) up --detach --build --remove-orphans
+
+podman-down:
+	$(PODMAN_COMPOSE) down --volumes --remove-orphans
+
+podman-ps:
+	$(PODMAN_COMPOSE) ps
+
+podman-logs:
+	$(PODMAN_COMPOSE) logs --follow
+
+podman-log-service:
+	$(PODMAN_COMPOSE) logs --follow $(SERVICE)
+
+podman-output:
+	$(PODMAN_COMPOSE) logs $(SERVICE)
+
+podman-attach:
+	@container_id="$$($(PODMAN_COMPOSE) ps --quiet $(SERVICE))"; \
+	if [ -z "$$container_id" ]; then \
+		echo "Service '$(SERVICE)' is not running; use 'make podman-output SCENARIO=$(SCENARIO) TOPOLOGY=$(TOPOLOGY) SERVICE=$(SERVICE)'" >&2; \
+		exit 2; \
+	fi; \
+	podman attach "$$container_id"
+
+podman-rebuild: podman-config
+	$(PODMAN_COMPOSE) build --no-cache

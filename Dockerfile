@@ -53,7 +53,9 @@ ENV PATH="/home/${USERNAME}/.cargo/bin:${PATH}"
 
 ARG CPP_STD_VER=13
 ENV GENERIC_CPP_STDLIB_PATH="/usr/include/c++/${CPP_STD_VER}"
-ENV ARCH_SPECIFIC_CPP_STDLIB_PATH="/usr/include/x86_64-linux-gnu/c++/${CPP_STD_VER}"
+RUN test -d "/usr/include/$(g++ -dumpmachine)/c++/${CPP_STD_VER}" && \
+    ln -s "/usr/include/$(g++ -dumpmachine)/c++/${CPP_STD_VER}" "/home/${USERNAME}/cpp-arch-include"
+ENV ARCH_SPECIFIC_CPP_STDLIB_PATH="/home/${USERNAME}/cpp-arch-include"
 ENV WORKSPACE_ROOT="${WORKSPACE_ROOT}"
 ENV PACOM_DIR="${WORKSPACE_ROOT}/pacom"
 
@@ -117,7 +119,8 @@ RUN apt-get update && \
         iproute2 \
         net-tools \
         iputils-ping \
-        libboost-all-dev \
+        libboost-filesystem1.83.0 \
+        libboost-thread1.83.0 \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
