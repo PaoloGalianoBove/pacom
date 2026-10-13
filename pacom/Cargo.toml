@@ -54,3 +54,7 @@ path = "examples/birthday_paradox/subscriber/main.rs"
 [[example]]
 name = "light_ecu"
 path = "examples/mqtt_bridge/light-ecu/main.rs"
+
+[[example]]
+name = "kuksa_rgb"
+path = "examples/kuksa_rgb/main.rs"

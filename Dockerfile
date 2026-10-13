@@ -1,4 +1,4 @@
-FROM ubuntu:24.04 AS dev
+FROM ubuntu:24.04 AS base
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -50,6 +50,10 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     $HOME/.cargo/bin/rustup default stable
 
 ENV PATH="/home/${USERNAME}/.cargo/bin:${PATH}"
+# rustc sotto QEMU va in stack overflow in LLVM con lo stack predefinito.
+ENV RUST_MIN_STACK=33554432
+ARG CARGO_BUILD_JOBS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 ARG CPP_STD_VER=13
 ENV GENERIC_CPP_STDLIB_PATH="/usr/include/c++/${CPP_STD_VER}"
@@ -63,6 +67,9 @@ WORKDIR ${WORKSPACE_ROOT}
 # 1. Copia SOLO i file di definizione per sfruttare la cache di Docker
 COPY --chown=${USERNAME}:${USERNAME} ./pacom/Cargo.toml ./pacom/Cargo.lock ${PACOM_DIR}/
 WORKDIR ${PACOM_DIR}
+
+FROM base AS dev
+ARG USERNAME=ubuntu
 
 # 2. Crea un progetto dummy e compila per scaricare/compilare tutte le dipendenze (incluso vSomeIP C++) in debug e release
 RUN mkdir src && echo "pub fn dummy() {}" > src/lib.rs && \
@@ -85,9 +92,16 @@ WORKDIR ${PACOM_DIR}
 EXPOSE 30491 30492 30490/udp
 CMD ["/bin/bash"]
 
-FROM dev AS builder
-WORKDIR ${PACOM_DIR}
-RUN cargo build --release --examples
+FROM base AS builder
+ARG USERNAME=ubuntu
+
+# Solo release: lo stadio runtime non usa gli artefatti debug, che raddoppiano lo spazio richiesto.
+RUN mkdir src && echo "pub fn dummy() {}" > src/lib.rs && \
+    grep 'path = ' Cargo.toml | awk -F'"' '{print $2}' | while read f; do mkdir -p $(dirname "$f") && echo "fn main() {}" > "$f"; done && \
+    cargo build --release --lib
+
+COPY --chown=${USERNAME}:${USERNAME} ./pacom ${PACOM_DIR}
+RUN touch src/lib.rs && cargo build --release --examples
 
 USER root
 RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
@@ -98,6 +112,7 @@ RUN mkdir -p /opt/pacom-runtime/lib /opt/pacom/bin /opt/pacom/examples && \
     cp "${PACOM_DIR}/target/release/examples/light_dashboard" /opt/pacom/bin/light_dashboard && \
     cp "${PACOM_DIR}/target/release/examples/cloud_app" /opt/pacom/bin/cloud_app && \
     cp "${PACOM_DIR}/target/release/examples/light_ecu" /opt/pacom/bin/light_ecu || true && \
+    cp "${PACOM_DIR}/target/release/examples/kuksa_rgb" /opt/pacom/bin/pacom-kuksa-rgb && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox" /opt/pacom/bin/birthday_paradox || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox_pub" /opt/pacom/bin/birthday_paradox_pub || true && \
     cp "${PACOM_DIR}/target/release/examples/birthday_paradox_sub" /opt/pacom/bin/birthday_paradox_sub || true && \

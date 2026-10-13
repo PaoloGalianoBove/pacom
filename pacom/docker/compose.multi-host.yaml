@@ -75,9 +75,12 @@ services:
   mosquitto:
     image: eclipse-mosquitto:1.6
     profiles: ["mqtt"]
+    user: mosquitto
+    entrypoint: ["/usr/sbin/mosquitto"]
+    command: ["-c", "/etc/mosquitto/mosquitto.conf"]
     networks: [pacom-net]
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
 
   cloud-app:
     image: pacom-demo:latest
@@ -109,7 +112,10 @@ services:
   app-ecu:
     image: pacom-demo:latest
     profiles: ["ecu"]
-    entrypoint: ["/opt/pacom/bin/light_ecu"]
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - "until (echo >/dev/tcp/databroker/55555) 2>/dev/null; do sleep 1; done; exec /opt/pacom/bin/light_ecu"
+    restart: on-failure
     networks: [pacom-net]
     stdin_open: true
     tty: true

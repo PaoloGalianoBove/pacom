@@ -12,6 +12,8 @@ const RPC_SET_LIGHTS: &str = "/rpc/lights/set";
 const TOPIC_STATUS: &str = "/status/lights";
 const TOPIC_CLOUD_TELEMETRY: &str = "/cloud/telemetry";
 const TOPIC_CLOUD_COMMAND: &str = "/cloud/command";
+const AMBIENT_COLOR_SIGNAL: &str =
+    "Vehicle.Cabin.Light.AmbientLight.Row1.DriverSide.Color";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -153,46 +155,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn actuate_lights(kuksa_client: Arc<Mutex<KuksaClientV2>>, cmd: &str) {
-    let mut actuate_low = None;
-    let mut actuate_high = None;
-
-    match cmd {
-        "All Off" => {
-            actuate_low = Some(false);
-            actuate_high = Some(false);
-        }
-        "Low Beam On" => actuate_low = Some(true),
-        "Low Beam Off" => actuate_low = Some(false),
-        "High Beam On" => actuate_high = Some(true),
-        "High Beam Off" => actuate_high = Some(false),
-        _ => {}
-    }
+    let Some(hex) = cmd.strip_prefix("RGB:") else {
+        // Low/high beam commands are intentionally disabled: this deployment
+        // maps only the ambient RGB actuator to CAN.
+        // "Low Beam On" / "Low Beam Off" / "High Beam On" / "High Beam Off"
+        // are no longer sent to KUKSA.
+        eprintln!("[KUKSA] Unsupported command: {}", cmd);
+        return;
+    };
+    let Some(color) = normalize_rgb_hex(hex) else {
+        eprintln!("[KUKSA] Invalid RGB command. Expected RGB followed by six hex digits.");
+        return;
+    };
 
     let mut client = kuksa_client.lock().await;
+    let _ = client
+        .actuate(
+            AMBIENT_COLOR_SIGNAL.to_string(),
+            Value {
+                typed_value: Some(TypedValue::String(color.clone())),
+            },
+        )
+        .await
+        .map_err(|e| eprintln!("[KUKSA] Error actuating ambient RGB color: {:?}", e));
+    println!("[KUKSA] Actuated ambient RGB color to {}", color);
+}
 
-    if let Some(val) = actuate_low {
-        let _ = client
-            .actuate(
-                "Vehicle.Body.Lights.Beam.Low.IsOn".to_string(),
-                Value {
-                    typed_value: Some(TypedValue::Bool(val)),
-                },
-            )
-            .await
-            .map_err(|e| eprintln!("[KUKSA] Error actuating Low Beam: {:?}", e));
-        println!("[KUKSA] Actuated Low Beam to {}", val);
+fn normalize_rgb_hex(input: &str) -> Option<String> {
+    let hex = input.trim();
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
     }
-
-    if let Some(val) = actuate_high {
-        let _ = client
-            .actuate(
-                "Vehicle.Body.Lights.Beam.High.IsOn".to_string(),
-                Value {
-                    typed_value: Some(TypedValue::Bool(val)),
-                },
-            )
-            .await
-            .map_err(|e| eprintln!("[KUKSA] Error actuating High Beam: {:?}", e));
-        println!("[KUKSA] Actuated High Beam to {}", val);
-    }
+    Some(format!("#{}", hex.to_ascii_uppercase()))
 }

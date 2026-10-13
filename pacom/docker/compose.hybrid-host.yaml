@@ -82,9 +82,12 @@ services:
   mosquitto:
     image: eclipse-mosquitto:1.6
     profiles: ["mqtt"]
+    user: mosquitto
+    entrypoint: ["/usr/sbin/mosquitto"]
+    command: ["-c", "/etc/mosquitto/mosquitto.conf"]
     networks: [pacom-net]
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
 
   cloud-app:
     image: pacom-demo:latest

@@ -1,0 +1,62 @@
+apiVersion: v1
+workloads:
+  pacom-rtt-router:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rtt-router
+        - --pull=never
+        - --network=host
+        - --user=0:0
+        - --volume=pacom-rtt-ipc:/tmp
+        - --env=PACOM_VSOMEIP_NODE_UE_IDS=0x1100,0x1101
+        - --env=PACOM_VSOMEIP_UNICAST_IP=127.0.0.1
+        - --entrypoint=/opt/pacom/docker/router-entrypoint.sh
+  pacom-rtt-server:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    dependencies:
+      pacom-rtt-router: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rtt-server
+        - --pull=never
+        - --network=host
+        - --volume=pacom-rtt-ipc:/tmp
+        - --env=APP_BIN=pacom-server
+        - --env=UP_AUTHORITY=rtt-server
+        - --env=UP_UE_ID=0x1100
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/rtt/server/manifest.json
+        - --env=PACOM_DISCOVERY_MAX_WAIT_MS=1000
+        - --env=PACOM_RPC_TIMEOUT_MS=500
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until test -S /tmp/vsomeip-0; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]
+  pacom-rtt-client:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: NEVER
+    dependencies:
+      pacom-rtt-router: ADD_COND_RUNNING
+      pacom-rtt-server: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rtt-client
+        - --pull=never
+        - --network=host
+        - --volume=pacom-rtt-ipc:/tmp
+        - --volume=/opt/pacom/results:/results:rw
+        - --env=APP_BIN=pacom-client
+        - --env=UP_AUTHORITY=rtt-client
+        - --env=UP_UE_ID=0x1101
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/rtt/client/manifest.json
+        - --env=PACOM_DISCOVERY_MAX_WAIT_MS=1000
+        - --env=PACOM_RPC_TIMEOUT_MS=500
+        - --env=PACOM_RTT_OUTPUT_PATH=/results/rtt_measurements_ipc.csv
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until test -S /tmp/vsomeip-0; do sleep 1; done; sleep 2; exec /opt/pacom/docker/entrypoint.sh"]

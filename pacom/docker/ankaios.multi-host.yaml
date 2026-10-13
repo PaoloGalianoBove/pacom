@@ -1,4 +1,4 @@
-                                                                                                                                                                                                                                                                                                                                                                                                                                    apiVersion: v1
+apiVersion: v1
 workloads:
   pacom-router-a:
     agent: agent_A
@@ -9,13 +9,13 @@ workloads:
       commandOptions:
         - --name=pacom-router-a
         - --pull=never
-        - --network=pacom-net
+        - --network=pacom-ankaios-net
         - --user=0:0
         - --volume=pacom-ipc-a:/tmp
         - --env=PACOM_VSOMEIP_NODE_UE_IDS=0x3301,0x1234
         - --entrypoint=/opt/pacom/docker/router-entrypoint.sh
-  pacom-app-a:                                                          
-    agent: agent_A                                                                                                                                                                                                                                                                                                                                                                                            
+  pacom-app-a:
+    agent: agent_A
     runtime: podman
     restartPolicy: ALWAYS
     dependencies:                                                                                                                   
@@ -27,6 +27,8 @@ workloads:
       commandOptions:
         - --pull=never
         - --network=container:pacom-router-a
+        - --add-host=mosquitto:10.90.55.10
+        - --add-host=databroker:10.90.55.11
         - --volume=pacom-ipc-a:/tmp
         - --interactive
         - --tty
@@ -50,7 +52,7 @@ workloads:
       commandOptions:
         - --name=pacom-router-b
         - --pull=never
-        - --network=pacom-net
+        - --network=pacom-ankaios-net
         - --user=0:0
         - --volume=pacom-ipc-b:/tmp
         - --env=PACOM_VSOMEIP_NODE_UE_IDS=0x3301,0x1234
@@ -88,9 +90,13 @@ workloads:
       image: docker.io/library/eclipse-mosquitto:1.6
       commandOptions:
         - --pull=never
-        - --network=pacom-net
-        - --network-alias=mosquitto
-        - --volume=/opt/pacom/ankaios/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+        - --network=pacom-ankaios-net
+        - --ip=10.90.55.10
+        - --security-opt=apparmor=unconfined
+        - --user=mosquitto
+        - --entrypoint=/usr/sbin/mosquitto
+        - --volume=/opt/pacom/ankaios/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      commandArgs: ["-c", "/etc/mosquitto/mosquitto.conf"]
   pacom-cloud-app:
     agent: agent_A
     runtime: podman
@@ -102,7 +108,8 @@ workloads:
       commandOptions:
         - --name=pacom-cloud-app
         - --pull=never
-        - --network=pacom-net
+        - --network=pacom-ankaios-net
+        - --add-host=mosquitto:10.90.55.10
         - --interactive
         - --tty
         - --env=APP_BIN=cloud_app
@@ -122,9 +129,8 @@ workloads:
       image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.6.0
       commandOptions:
         - --pull=never
-        - --network=pacom-net
-        - --network-alias=databroker
-        - --publish=55555:55555
+        - --network=pacom-ankaios-net
+        - --ip=10.90.55.11
         - --volume=/opt/pacom/ankaios/vss.json:/vss.json:ro
       commandArgs: ["--metadata", "/vss.json"]
   pacom-app-ecu:
@@ -137,7 +143,8 @@ workloads:
       image: localhost/pacom-demo:latest
       commandOptions:
         - --pull=never
-        - --network=pacom-net
+        - --network=pacom-ankaios-net
+        - --add-host=databroker:10.90.55.11
         - --interactive
         - --tty
         - --env=APP_BIN=light_ecu

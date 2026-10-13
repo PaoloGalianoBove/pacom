@@ -1,0 +1,225 @@
+apiVersion: v1
+configs:
+  host_paths:
+    runtime_root: "/opt/ankaios"
+  runtime_defaults:
+    log_level: "INFO"
+    kuksa_host: "127.0.0.1"
+    kuksa_port: "55555"
+    dlt_host: "127.0.0.1"
+    dlt_port: "3491"
+    dlt_mode: "tcp"
+    can_if: "llcecan0"
+workloads:
+  dlt-daemon:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: NEVER
+    configs:
+      host_paths: host_paths
+    tags:
+      log_collect: "true"
+    runtimeConfig: |
+      image: crg.apkg.io/igs32/dlt-daemon:latest
+      commandOptions:
+        - "--network"
+        - "host"
+        - "--ipc"
+        - "host"
+        - "--cgroup-manager=cgroupfs"
+        - "--privileged"
+        - "-v"
+        - "{{host_paths.runtime_root}}/shared/dlt/dlt.conf:/etc/dlt.conf:ro"
+  kuksa-databroker:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: NEVER
+    configs:
+      host_paths: host_paths
+    tags:
+      log_collect: "true"
+    runtimeConfig: |
+      image: ghcr.io/eclipse-kuksa/kuksa-databroker:0.6.0
+      commandOptions:
+        - "--network"
+        - "host"
+        - "--ipc"
+        - "host"
+        - "--cgroup-manager=cgroupfs"
+        - "--privileged"
+        - "-v"
+        - "{{host_paths.runtime_root}}/shared/vspec.json:/data/vspec.json:ro"
+        - "--env"
+        - "NO_COLOR=1"
+        - "--env"
+        - "RUST_LOG_STYLE=never"
+      commandArgs:
+        - "--insecure"
+        - "--disable-authorization"
+        - "--address"
+        - "0.0.0.0"
+        - "--port"
+        - "55555"
+        - "--vss"
+        - "/data/vspec.json"
+        - "--enable-databroker-v1"
+  kuksa-can-provider:
+    runtime: podman
+    agent: agent_A
+    restartPolicy: NEVER
+    dependencies:
+      dlt-daemon: ADD_COND_RUNNING
+      kuksa-databroker: ADD_COND_RUNNING
+    configs:
+      host_paths: host_paths
+      runtime_defaults: runtime_defaults
+    tags:
+      log_collect: "true"
+    runtimeConfig: |
+      image: crg.apkg.io/igs32/vcanprovider:latest
+      commandOptions:
+        - "--network"
+        - "host"
+        - "--ipc"
+        - "host"
+        - "--cgroup-manager=cgroupfs"
+        - "--privileged"
+        - "--entrypoint"
+        - "python"
+        - "-v"
+        - "{{host_paths.runtime_root}}/shared:/shared:ro"
+        - "-v"
+        - "{{host_paths.runtime_root}}/patches/vcanprovider_app.py:/app/src/vcanprovider/app.py:ro"
+        - "-v"
+        - "{{host_paths.runtime_root}}/patches/databrokerclientwrapper.py:/app/src/vcanprovider/dbcfeederlib/databrokerclientwrapper.py:ro"
+        - "--env"
+        - "LOG_LEVEL=INFO"
+        - "--env"
+        - "KUKSA_ADDRESS=127.0.0.1"
+        - "--env"
+        - "KUKSA_PORT=55555"
+        - "--env"
+        - "CAN_PORT={{runtime_defaults.can_if}}"
+        - "--env"
+        - "DBC_FILE=/shared/feeder/dbc-idg.dbc"
+        - "--env"
+        - "MAPPING_FILE=/shared/feeder/vss_dbc_idg.json"
+        - "--env"
+        - "DBC_DEFAULT_FILE=/shared/feeder/dbc_default_values.json"
+        - "--env"
+        - "USE_DBC2VAL=1"
+        - "--env"
+        - "USE_VAL2DBC=1"
+        - "--env"
+        - "DLT_APP_ID=VCAN"
+        - "--env"
+        - "DLT_CONTEXT_ID=FEED"
+        - "--env"
+        - "DLT_HOST={{runtime_defaults.dlt_host}}"
+        - "--env"
+        - "DLT_PORT={{runtime_defaults.dlt_port}}"
+        - "--env"
+        - "DLT_MODE={{runtime_defaults.dlt_mode}}"
+      commandArgs:
+        - "main.py"
+        - "--config"
+        - "/shared/feeder/dbc_feeder.ini"
+  pacom-mosquitto:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: docker.io/library/eclipse-mosquitto:1.6
+      commandOptions:
+        - --name=pacom-rgb-mosquitto
+        - --pull=never
+        - --network=host
+        - --security-opt=apparmor=unconfined
+        - --user=mosquitto
+        - --entrypoint=/usr/sbin/mosquitto
+        - --volume=/opt/pacom/ankaios/mosquitto.conf:/etc/mosquitto/mosquitto.conf:ro
+      commandArgs: ["-c", "/etc/mosquitto/mosquitto.conf"]
+  pacom-rgb-router:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rgb-router
+        - --pull=never
+        - --network=host
+        - --user=0:0
+        - --volume=pacom-rgb-ipc:/tmp
+        - --env=PACOM_VSOMEIP_NODE_UE_IDS=0x3301,0x1234
+        - --env=PACOM_VSOMEIP_UNICAST_IP=127.0.0.1
+        - --entrypoint=/opt/pacom/docker/router-entrypoint.sh
+  pacom-rgb-switch:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: ALWAYS
+    dependencies:
+      pacom-rgb-router: ADD_COND_RUNNING
+      kuksa-databroker: ADD_COND_RUNNING
+      kuksa-can-provider: ADD_COND_RUNNING
+      pacom-mosquitto: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rgb-switch
+        - --pull=never
+        - --network=host
+        - --volume=pacom-rgb-ipc:/tmp
+        - --env=APP_BIN=light_switch
+        - --env=UP_AUTHORITY=ecu-switch
+        - --env=UP_UE_ID=0x3301
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/mqtt_bridge/light-switch/manifest.json
+        - --env=PACOM_KUKSA_URI=http://127.0.0.1:55555
+        - --env=PACOM_MQTT_BROKER_URI=mqtt://127.0.0.1:1883
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until test -S /tmp/vsomeip-0 && (echo >/dev/tcp/127.0.0.1/55555) 2>/dev/null; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]
+  pacom-rgb-dashboard:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: NEVER
+    dependencies:
+      pacom-rgb-router: ADD_COND_RUNNING
+      pacom-rgb-switch: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rgb-dashboard
+        - --pull=never
+        - --network=host
+        - --volume=pacom-rgb-ipc:/tmp
+        - --interactive
+        - --tty
+        - --env=APP_BIN=light_dashboard
+        - --env=UP_AUTHORITY=ecu-dashboard
+        - --env=UP_UE_ID=0x1234
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/mqtt_bridge/light-dashboard/manifest.json
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until test -S /tmp/vsomeip-0; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]
+  pacom-rgb-cloud:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: NEVER
+    dependencies:
+      pacom-mosquitto: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --name=pacom-rgb-cloud
+        - --pull=never
+        - --network=host
+        - --interactive
+        - --tty
+        - --env=APP_BIN=cloud_app
+        - --env=UP_AUTHORITY=cloud.bridge
+        - --env=UP_UE_ID=0x2200
+        - --env=PACOM_MANIFEST_PATH=/opt/pacom/examples/mqtt_bridge/cloud-app/manifest.json
+        - --env=PACOM_MQTT_BROKER_URI=mqtt://127.0.0.1:1883
+        - --env=PACOM_CLOUD_AUTHORITY=cloud.bridge
+        - --env=PACOM_DISABLE_VSOMEIP=true
+        - --entrypoint=/bin/bash
+      commandArgs: ["-c", "until (echo >/dev/tcp/127.0.0.1/1883) 2>/dev/null; do sleep 1; done; exec /opt/pacom/docker/entrypoint.sh"]

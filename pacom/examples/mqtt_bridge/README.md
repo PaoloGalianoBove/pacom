@@ -23,6 +23,18 @@ Esempio completo con tre app:
 
 Avvia i tre container con i README di deploy in questa cartella.
 
+Nel menu della dashboard o del client cloud, l'opzione `2` chiede un colore RGB
+come sei cifre esadecimali senza `#` (ad esempio `12A4FF`) e lo invia allo
+switch. L'opzione `0` invia `#000000` per spegnere il colore. Lo switch attua il
+segnale KUKSA `Vehicle.Cabin.Light.AmbientLight.Row1.DriverSide.Color`, mappato
+dal provider CAN al segnale DBC `Light_RGB`.
+
+I comandi high/low beam restano nel codice commentati, ma non sono esposti nel
+menu né inviati: il mapping CAN di questa demo espone solo RGB.
+
+Se `vambienttemp` è attivo, i nuovi campioni temperatura possono impostare a
+loro volta lo stesso segnale colore e sovrascrivere il valore manuale.
+
 ## Verifica minima
 
 1. invia comando dal dashboard e verifica update locale

@@ -1,0 +1,17 @@
+apiVersion: v1
+workloads:
+  pacom-kuksa-rgb:
+    agent: agent_A
+    runtime: podman
+    restartPolicy: NEVER
+    dependencies:
+      kuksa-databroker: ADD_COND_RUNNING
+      kuksa-can-provider: ADD_COND_RUNNING
+    runtimeConfig: |
+      image: localhost/pacom-demo:latest
+      commandOptions:
+        - --pull=never
+        - --network=host
+        - --env=PACOM_KUKSA_URI=http://127.0.0.1:55555
+        - --entrypoint=/opt/pacom/bin/pacom-kuksa-rgb
+      commandArgs: ["#FF0000"]

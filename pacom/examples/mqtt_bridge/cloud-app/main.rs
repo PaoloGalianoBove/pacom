@@ -55,11 +55,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let cmd = match text {
-            "0" => Some("All Off"),
-            "1" => Some("Low Beam On"),
-            "2" => Some("Low Beam Off"),
-            "3" => Some("High Beam On"),
-            "4" => Some("High Beam Off"),
+            "0" => Some("RGB:000000".to_string()),
+            "2" => {
+                print!("Enter RGB hex value (RRGGBB, without #): ");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                let Some(rgb_hex) = lines.next_line().await? else {
+                    break;
+                };
+                match normalize_rgb_hex(&rgb_hex) {
+                    Some(rgb_hex) => Some(format!("RGB:{rgb_hex}")),
+                    None => {
+                        println!("Invalid RGB value. Enter exactly six hexadecimal digits.");
+                        print_menu();
+                        continue;
+                    }
+                }
+            }
+            // "1" => Some("Low Beam On"),
+            // "3" => Some("High Beam On"),
+            // "4" => Some("High Beam Off"),
+            // "5" => Some("Low Beam Off"),
             _ => None,
         };
 
@@ -72,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("[CLOUD - MQTT ERROR] Failed to send command: {}", e);
             }
         } else {
-            println!("Invalid option. Enter 0-4 (or '/quit' to exit).");
+            println!("Invalid option. Enter 0 or 2 (or '/quit' to exit).");
         }
     }
 
@@ -82,13 +98,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn print_menu() {
     println!("\n====================================");
     println!("[CLOUD] Send MQTT commands:");
-    println!("0. All Off");
-    println!("1. Low Beam On");
-    println!("2. Low Beam Off");
-    println!("3. High Beam On");
-    println!("4. High Beam Off");
+    println!("0. RGB Off (#000000)");
+    println!("2. Set ambient RGB color");
+    // Beam commands are disabled because this CAN mapping exposes only RGB.
+    // println!("1. Low Beam On");
+    // println!("3. High Beam On");
+    // println!("4. High Beam Off");
+    // println!("5. Low Beam Off");
     println!("====================================");
-    print!("Choose an option (0-4 or '/quit'): ");
+    print!("Choose an option (0, 2 or '/quit'): ");
     use std::io::Write;
     let _ = std::io::stdout().flush();
+}
+
+fn normalize_rgb_hex(input: &str) -> Option<String> {
+    let hex = input.trim();
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(hex.to_ascii_uppercase())
 }

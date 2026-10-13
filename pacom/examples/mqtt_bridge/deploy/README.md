@@ -125,8 +125,9 @@ docker run -it --rm \
 
 Una volta avviati tutti i container:
 
-- Da `light_dashboard`: scegli `1` (Low Beam) → comando RPC via SOME/IP → `light_switch` risponde.
-- Da `cloud_app`: scegli `2` (High Beam) → comando MQTT → `light_switch` riceve e aggiorna lo stato.
+- Da `light_dashboard`: scegli `2`, inserisci sei cifre RGB senza `#` (ad esempio `12A4FF`) → comando RPC via SOME/IP → `light_switch` attua il colore via KUKSA.
+- Da `cloud_app`: scegli `2` e inserisci il colore RGB → comando MQTT → `light_switch` attua il colore via KUKSA.
+- Da entrambi i menu, scegli `0` per inviare il colore spento `#000000`.
 - Osserva che `light_dashboard` aggiorna il suo stato anche dopo un comando cloud (via SOME/IP topic `/status/lights`).
 
 ---
