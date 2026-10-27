@@ -1,4 +1,4 @@
-# `pacom` — Platform Abstraction for Connected and Automotive Middleware
+# `pacom` — Platform for Automotive Cloud-native Onboard Middleware
 
 > **A zero-coupling uProtocol SDK for Software-Defined Vehicle applications.**  
 > Write your app once. Deploy it anywhere — any ECU, any zone, any topology.
